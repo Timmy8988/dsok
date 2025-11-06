@@ -1,0 +1,1964 @@
+// 全局变量
+let socket;
+let botRunning = false;
+let runningTime = 0;
+let runningTimeInterval;
+let refreshInterval;
+let currentEquityRange = '7d'; // 默认7天
+
+// 初始化
+document.addEventListener('DOMContentLoaded', function() {
+    // 先初始化事件监听器（在更新UI之前）
+    initializeEventListeners();
+    
+    initializeSocket();
+    loadInitialData();
+    startAutoRefresh();
+    initializeMobileFeatures();
+    startCountdownTimer(); // 启动倒计时
+    initializeEquityRangeSelector(); // 初始化资金曲线时间范围选择器
+    initEquityChart(); // 初始化资金曲线图表
+});
+
+// 初始化移动端功能
+function initializeMobileFeatures() {
+    // 添加触摸反馈
+    addTouchFeedback();
+    
+    // 优化滚动体验
+    optimizeScrolling();
+    
+    // 添加移动端手势支持
+    addGestureSupport();
+    
+    // 优化键盘输入
+    optimizeKeyboardInput();
+    
+    // 添加离线检测
+    addOfflineDetection();
+}
+
+// 添加触摸反馈
+function addTouchFeedback() {
+    const buttons = document.querySelectorAll('.btn');
+    buttons.forEach(button => {
+        button.addEventListener('touchstart', function() {
+            this.style.transform = 'scale(0.95)';
+            this.style.transition = 'transform 0.1s ease';
+        });
+        
+        button.addEventListener('touchend', function() {
+            this.style.transform = 'scale(1)';
+        });
+        
+        button.addEventListener('touchcancel', function() {
+            this.style.transform = 'scale(1)';
+        });
+    });
+}
+
+// 优化滚动体验
+function optimizeScrolling() {
+    // 平滑滚动
+    document.documentElement.style.scrollBehavior = 'smooth';
+    
+    // 防止过度滚动
+    document.body.style.overscrollBehavior = 'contain';
+    
+    // 优化日志滚动
+    const logContainer = document.getElementById('logContent');
+    if (logContainer) {
+        logContainer.style.scrollBehavior = 'smooth';
+    }
+}
+
+// 添加手势支持
+function addGestureSupport() {
+    let startY = 0;
+    let startX = 0;
+    
+    document.addEventListener('touchstart', function(e) {
+        startY = e.touches[0].clientY;
+        startX = e.touches[0].clientX;
+    });
+    
+    document.addEventListener('touchmove', function(e) {
+        const currentY = e.touches[0].clientY;
+        const currentX = e.touches[0].clientX;
+        const diffY = startY - currentY;
+        const diffX = startX - currentX;
+        
+        // 检测下拉刷新手势
+        if (diffY < -100 && Math.abs(diffX) < 50) {
+            refreshData();
+            // 下拉刷新触发，不显示在日志中
+        }
+    });
+}
+
+// 优化键盘输入
+function optimizeKeyboardInput() {
+    const inputs = document.querySelectorAll('input[type="number"], input[type="text"]');
+    inputs.forEach(input => {
+        // 移动端数字键盘
+        if (input.type === 'number') {
+            input.setAttribute('inputmode', 'decimal');
+        }
+        
+        // 防止缩放
+        input.addEventListener('focus', function() {
+            if (window.innerWidth < 768) {
+                setTimeout(() => {
+                    this.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 300);
+            }
+        });
+    });
+}
+
+// 添加离线检测
+function addOfflineDetection() {
+    window.addEventListener('online', function() {
+        // 重新连接WebSocket
+        if (socket && !socket.connected) {
+            socket.connect();
+        }
+    });
+    
+    window.addEventListener('offline', function() {
+        // 网络已断开
+    });
+}
+
+// 初始化WebSocket连接
+function initializeSocket() {
+    socket = io();
+    
+    socket.on('connect', function() {
+        // WebSocket连接成功
+    });
+    
+    socket.on('disconnect', function() {
+        // WebSocket断开
+    });
+    
+    socket.on('update_data', function(data) {
+        updateTradingData(data);
+    });
+}
+
+// 初始化事件监听器
+function initializeEventListeners() {
+    // 控制按钮
+    const refreshBtn = document.getElementById('refreshNow');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', refreshData);
+    }
+    
+    // 测试模式切换按钮
+    const toggleTestModeBtn = document.getElementById('toggleTestMode');
+    if (toggleTestModeBtn) {
+        toggleTestModeBtn.addEventListener('click', toggleTestMode);
+    }
+    
+    // 自动刷新设置
+    const autoRefreshCheckbox = document.getElementById('autoRefresh');
+    if (autoRefreshCheckbox) {
+        autoRefreshCheckbox.addEventListener('change', toggleAutoRefresh);
+    }
+    
+    const refreshIntervalSelect = document.getElementById('refreshInterval');
+    if (refreshIntervalSelect) {
+        refreshIntervalSelect.addEventListener('change', updateRefreshInterval);
+    }
+}
+
+// 加载初始数据
+async function loadInitialData() {
+    try {
+        // 添加欢迎日志
+        addLogEntry('🎯 交易机器人管理系统已就绪', 'INFO', 'fas fa-robot');
+        
+        const response = await fetch('/api/status');
+        const data = await response.json();
+        
+        updateStatus(data);
+        
+        // 更新交易模式状态显示
+        if (data.config && data.config.test_mode !== undefined) {
+            currentTestMode = Boolean(data.config.test_mode);
+            updateTradingModeStatus(currentTestMode);
+            updateTestModeDisplay(currentTestMode);
+        }
+        
+        // 加载机器人状态
+        await updateBotRunningStatus();
+    } catch (error) {
+        console.error('加载数据失败:', error);
+        addLogEntry('❌ 加载初始数据失败', 'ERROR', 'fas fa-exclamation-triangle');
+        // 即使加载失败，也设置默认状态
+        updateTradingModeStatus(true);
+    }
+}
+
+// 切换机器人状态（启动/停止）
+async function toggleBot() {
+    const btn = document.getElementById('toggleBot');
+    const isRunning = btn.classList.contains('btn-danger');
+    
+    // 禁用按钮防止重复点击
+    btn.disabled = true;
+    
+    try {
+        if (isRunning) {
+            // 当前是运行状态，执行停止
+            const confirmed = confirm('⚠️ 确定要停止交易机器人吗？\n\n停止后机器人将不再执行交易。');
+            if (!confirmed) {
+                btn.disabled = false;
+                return;
+            }
+            
+            // 添加操作日志
+            addLogEntry('🛑 正在停止交易机器人...', 'WARNING', 'fas fa-stop-circle');
+            
+            const response = await fetch('/api/stop_bot', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                addLogEntry('✅ 交易机器人已停止', 'SUCCESS', 'fas fa-check-circle');
+                alert('✅ ' + data.message);
+                await updateBotRunningStatus();
+            } else {
+                addLogEntry('❌ 停止机器人失败: ' + data.message, 'ERROR', 'fas fa-exclamation-circle');
+                alert('❌ 停止失败: ' + data.message);
+            }
+        } else {
+            // 当前是停止状态，执行启动
+            addLogEntry('🚀 正在启动交易机器人...', 'INFO', 'fas fa-rocket');
+            
+            const response = await fetch('/api/start_bot', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                addLogEntry('✅ 交易机器人已启动', 'SUCCESS', 'fas fa-check-circle');
+                alert('✅ ' + data.message);
+                await updateBotRunningStatus();
+            } else {
+                addLogEntry('❌ 启动机器人失败: ' + data.message, 'ERROR', 'fas fa-exclamation-circle');
+                alert('❌ 启动失败: ' + data.message);
+            }
+        }
+    } catch (error) {
+        console.error('操作机器人失败:', error);
+        addLogEntry('❌ 操作失败: ' + error.message, 'ERROR', 'fas fa-times-circle');
+        alert('❌ 操作失败，请查看控制台');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// 更新交易模式状态（显示已移除，保留函数以避免报错）
+function updateTradingModeStatus(testMode) {
+    // 显示已移除，此函数保留为空实现
+}
+
+// 更新机器人运行状态
+async function updateBotRunningStatus() {
+    try {
+        const response = await fetch('/api/bot_status');
+        const data = await response.json();
+        
+        if (data.success) {
+            updateBotStatusUI(data.running, data.status, data.uptime_ms || 0);
+        }
+    } catch (error) {
+        console.error('获取机器人状态失败:', error);
+    }
+}
+
+// 刷新数据
+async function refreshData() {
+    try {
+        const response = await fetch('/api/refresh_data', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        updateTradingData(data);
+        // 不再添加Web应用自己的日志，因为现在显示交易机器人的真实日志
+    } catch (error) {
+        console.error('刷新数据失败:', error);
+    }
+}
+
+// 当前测试模式状态（从服务器获取）
+let currentTestMode = true;
+
+// 切换测试模式
+async function toggleTestMode() {
+    const btn = document.getElementById('toggleTestMode');
+    
+    if (!btn || btn.disabled) {
+        return;
+    }
+    
+    // 切换模式
+    const newMode = !currentTestMode;
+    const modeName = newMode ? '测试模式' : '实盘模式';
+    
+    // 如果切换到实盘模式，需要确认
+    if (!newMode) {
+        const confirmed = confirm(
+            '⚠️ 警告：切换到实盘模式\n\n' +
+            '实盘模式将进行真实交易！\n\n' +
+            '• 会使用真实资金下单\n' +
+            '• 可能产生盈利或亏损\n' +
+            '• 请确保账户有足够余额\n\n' +
+            '确定要切换到实盘模式吗？'
+        );
+        if (!confirmed) {
+            addLogEntry('ℹ️ 用户取消切换模式', 'INFO', 'fas fa-info-circle');
+            return;
+        }
+    }
+    
+    // 打印开始切换日志
+    addLogEntry(`🔄 正在切换交易模式: ${currentTestMode ? '测试模式' : '实盘模式'} → ${modeName}`, 'INFO', 'fas fa-exchange-alt');
+    
+    // 禁用按钮
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right: 6px;"></i> 保存中...';
+    
+    try {
+        const response = await fetch('/api/update_config', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                test_mode: newMode
+            })
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // 更新状态
+            currentTestMode = newMode;
+            // 更新显示
+            updateTestModeDisplay(newMode);
+            // 打印成功日志
+            addLogEntry(`✅ 交易模式切换成功: ${modeName}`, 'SUCCESS', 'fas fa-check-circle');
+            console.log(`✅ 交易模式切换成功: ${modeName}`, { oldMode: !newMode, newMode: newMode });
+        } else {
+            // 打印失败日志
+            const errorMsg = data.message || '未知错误';
+            addLogEntry(`❌ 切换失败: ${errorMsg}`, 'ERROR', 'fas fa-exclamation-circle');
+            console.error('❌ 切换失败:', errorMsg, data);
+            alert('❌ 切换失败: ' + errorMsg);
+        }
+    } catch (error) {
+        // 打印错误日志
+        const errorMsg = error.message || '网络错误';
+        addLogEntry(`❌ 切换失败: ${errorMsg}`, 'ERROR', 'fas fa-times-circle');
+        console.error('❌ 切换失败:', error);
+        alert('❌ 切换失败: ' + errorMsg);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-exchange-alt" style="margin-right: 6px;"></i> 切换模式';
+    }
+}
+
+// 更新测试模式显示
+function updateTestModeDisplay(testMode) {
+    const statusSpan = document.getElementById('testModeStatus');
+    const hintSpan = document.getElementById('testModeHint');
+    
+    if (statusSpan) {
+        if (testMode) {
+            statusSpan.textContent = '测试模式';
+            statusSpan.style.backgroundColor = '#28a745';
+            statusSpan.style.color = '#fff';
+        } else {
+            statusSpan.textContent = '实盘模式';
+            statusSpan.style.backgroundColor = '#dc3545';
+            statusSpan.style.color = '#fff';
+        }
+    }
+    
+    if (hintSpan) {
+        hintSpan.textContent = testMode 
+            ? '测试模式：仅模拟交易，不会真实下单' 
+            : '实盘模式：将进行真实交易，请谨慎操作';
+    }
+    
+    // 同时更新交易模式指示器
+    updateTradingModeStatus(testMode);
+}
+
+// 切换自动刷新
+function toggleAutoRefresh() {
+    const autoRefresh = document.getElementById('autoRefresh').checked;
+    if (autoRefresh) {
+        startAutoRefresh();
+    } else {
+        stopAutoRefresh();
+    }
+}
+
+// 更新刷新间隔
+function updateRefreshInterval() {
+    const interval = parseInt(document.getElementById('refreshInterval').value);
+    if (document.getElementById('autoRefresh').checked) {
+        stopAutoRefresh();
+        startAutoRefresh(interval);
+    }
+}
+
+// 开始自动刷新
+function startAutoRefresh(interval = 2) {
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+    }
+    
+    refreshInterval = setInterval(() => {
+        if (document.getElementById('autoRefresh').checked) {
+            refreshData();
+            // 同时更新机器人状态（包括运行时长）
+            updateBotRunningStatus();
+        }
+    }, interval * 1000);
+}
+
+// 停止自动刷新
+function stopAutoRefresh() {
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+    }
+}
+
+// 开始运行计时器（使用PM2提供的启动时间）
+function startRunningTimer(uptimeMs) {
+    if (uptimeMs > 0) {
+        // 根据PM2提供的uptime计算启动时间
+        botStartTime = Date.now() - uptimeMs;
+    } else {
+        botStartTime = Date.now();
+    }
+    
+    updateRunningTime();  // 立即更新一次
+    
+    if (runningTimeInterval) {
+        clearInterval(runningTimeInterval);
+    }
+    
+    // 每秒更新一次
+    runningTimeInterval = setInterval(() => {
+        updateRunningTime();
+    }, 1000);
+}
+
+// 停止运行计时器
+function stopRunningTimer() {
+    if (runningTimeInterval) {
+        clearInterval(runningTimeInterval);
+        runningTimeInterval = null;
+    }
+    botStartTime = null;
+    document.getElementById('runningTime').textContent = '0分钟';
+}
+
+// 更新运行时间显示
+function updateRunningTime() {
+    if (!botStartTime) {
+        document.getElementById('runningTime').textContent = '0分钟';
+        return;
+    }
+    
+    const elapsedMs = Date.now() - botStartTime;
+    const elapsedSeconds = Math.floor(elapsedMs / 1000);
+    const hours = Math.floor(elapsedSeconds / 3600);
+    const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+    const seconds = elapsedSeconds % 60;
+    
+    let timeString = '';
+    if (hours > 0) {
+        timeString = `${hours}小时${minutes}分钟`;
+    } else if (minutes > 0) {
+        timeString = `${minutes}分钟${seconds}秒`;
+    } else {
+        timeString = `${seconds}秒`;
+    }
+    
+    document.getElementById('runningTime').textContent = timeString;
+}
+
+// 更新机器人状态UI
+function updateBotStatusUI(isRunning, status, uptimeMs) {
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('botStatusText');
+    
+    if (isRunning) {
+        // 运行中状态
+        statusDot.style.color = '#28a745';
+        statusDot.classList.add('pulse');
+        statusText.textContent = '运行中';
+        statusText.style.color = '#28a745';
+        
+        // 只要机器人在运行，就更新运行时长
+        // 使用PM2提供的uptime计算实际启动时间
+        if (uptimeMs && uptimeMs > 0) {
+            botStartTime = Date.now() - uptimeMs;
+        } else if (!botStartTime) {
+            // 如果没有uptime信息，但机器人在运行，使用当前时间
+            botStartTime = Date.now();
+        }
+        
+        // 确保计时器在运行
+        if (!runningTimeInterval) {
+            runningTimeInterval = setInterval(() => {
+                updateRunningTime();
+            }, 1000);
+        }
+        
+        // 立即更新一次显示
+        updateRunningTime();
+    } else {
+        // 停止状态
+        statusDot.style.color = '#dc3545';
+        statusDot.classList.remove('pulse');
+        statusText.textContent = status === 'not_found' ? '未启动' : '已停止';
+        statusText.style.color = '#dc3545';
+        
+        // 停止运行时长计时器
+        stopRunningTimer();
+    }
+}
+
+// 简化：不再需要复杂的时间戳保护，直接使用服务器返回的配置
+
+// 更新状态数据
+function updateStatus(data) {
+    // 机器人状态现在通过 PM2 API 单独获取
+    
+    // 更新价格
+    if (data.price) {
+        document.getElementById('btcPrice').textContent = `$${data.price.toLocaleString()}`;
+    }
+    
+    // 更新信号
+    if (data.signal) {
+        updateSignal(data.signal, data.confidence);
+    }
+    
+    // 更新持仓信息
+    if (data.position) {
+        updatePositionDetails(data.position);
+    } else {
+        clearPositionDetails();
+    }
+    
+    // 更新交易模式状态显示
+    if (data.config && data.config.test_mode !== undefined) {
+        currentTestMode = Boolean(data.config.test_mode);
+        updateTradingModeStatus(currentTestMode);
+        updateTestModeDisplay(currentTestMode);
+    }
+}
+
+// 更新交易数据
+function updateTradingData(data) {
+    // 更新价格
+    if (data.price) {
+        document.getElementById('btcPrice').textContent = `$${data.price.toLocaleString()}`;
+    }
+    
+    // 更新信号
+    if (data.signal) {
+        updateSignal(data.signal, data.confidence);
+    }
+    
+    // 更新持仓
+    if (data.position) {
+        updatePositionDetails(data.position);
+        // 持仓更新后，重新加载资金曲线以显示当前资金
+        setTimeout(() => {
+            loadEquityCurve();
+        }, 100);
+    }
+    
+    // 不再显示数据更新时间戳在日志中
+}
+
+// 更新信号显示
+function updateSignal(signal, confidence) {
+    const signalElement = document.getElementById('latestSignal');
+    let signalText = '';
+    let signalClass = '';
+    
+    switch (signal) {
+        case 'BUY':
+            signalText = 'BUY 买入';
+            signalClass = 'buy';
+            break;
+        case 'SELL':
+            signalText = 'SELL 卖出';
+            signalClass = 'sell';
+            break;
+        case 'HOLD':
+            signalText = 'HOLD 观望';
+            signalClass = 'hold';
+            break;
+        default:
+            signalText = 'HOLD 观望';
+            signalClass = 'hold';
+    }
+    
+    signalElement.textContent = signalText;
+    signalElement.className = `value signal ${signalClass}`;
+    
+    // 更新信心程度显示
+    if (confidence) {
+        const confidenceElement = document.getElementById('confidenceLevel');
+        if (confidenceElement) {
+            const confidenceUpper = (confidence || 'MEDIUM').toUpperCase();
+            let confidenceText = '';
+            let confidenceClass = '';
+            
+            switch (confidenceUpper) {
+                case 'HIGH':
+                    confidenceText = 'HIGH 高';
+                    confidenceClass = 'confidence-high';
+                    break;
+                case 'MEDIUM':
+                    confidenceText = 'MEDIUM 中';
+                    confidenceClass = 'confidence-medium';
+                    break;
+                case 'LOW':
+                    confidenceText = 'LOW 低';
+                    confidenceClass = 'confidence-low';
+                    break;
+                default:
+                    confidenceText = 'MEDIUM 中';
+                    confidenceClass = 'confidence-medium';
+                    break;
+            }
+            
+            confidenceElement.textContent = confidenceText;
+            confidenceElement.className = `value confidence ${confidenceClass}`;
+        }
+    } else {
+        const confidenceElement = document.getElementById('confidenceLevel');
+        if (confidenceElement) {
+            confidenceElement.textContent = '--';
+            confidenceElement.className = 'value confidence';
+        }
+    }
+    
+    // 不再显示信号在日志中，因为现在显示交易机器人的真实日志
+}
+
+// 更新持仓详情
+function updatePositionDetails(position) {
+    // 检查是否有持仓
+    if (!position.side) {
+        clearPositionDetails();
+        // 但仍然显示账户余额
+        if (position.total_balance !== undefined) {
+            const totalBalance = position.total_balance;
+            document.getElementById('accountBalance').textContent = `$${totalBalance.toFixed(2)}`;
+            document.getElementById('availableBalance').textContent = `$${position.free_balance.toFixed(2)}`;
+            // 同步更新资金曲线的当前资金
+            syncEquityCurrentBalance(totalBalance);
+        }
+        return;
+    }
+    
+    // 根据持仓方向设置显示文本
+    let direction, directionText;
+    if (position.side === 'long') {
+        direction = '多单';
+        directionText = '多单 (做多)';
+    } else if (position.side === 'short') {
+        direction = '空单';
+        directionText = '空单 (做空)';
+    } else {
+        direction = '无持仓';
+        directionText = '无持仓';
+    }
+    
+    const directionClass = position.side === 'long' ? 'long' : 'short';
+    
+    document.getElementById('positionDirection').textContent = directionText;
+    document.getElementById('directionDot').className = `direction-dot ${directionClass}`;
+    document.getElementById('positionSize').textContent = `${position.size} 张`;
+    document.getElementById('btcQuantity').textContent = `${(position.size * 0.01).toFixed(4)} BTC`;
+    
+    // 当前价格（使用标记价格）
+    const currentPrice = position.mark_price || position.entry_price;
+    document.getElementById('currentPrice').textContent = `$${currentPrice.toFixed(2)}`;
+    
+    // 持仓价值
+    document.getElementById('positionValue').textContent = `$${(position.size * currentPrice * 0.01).toFixed(2)}`;
+    document.getElementById('entryPrice').textContent = `$${position.entry_price.toFixed(2)}`;
+    
+    // 杠杆
+    const leverage = position.leverage || 10;
+    document.getElementById('leverage').textContent = `${leverage}x`;
+    
+    // 保证金信息
+    document.getElementById('initialMargin').textContent = `$${(position.initial_margin || 0).toFixed(2)}`;
+    
+    // 维持保证金率 - 直接使用OKX返回的数据（已经是百分比数值）
+    const maintMarginRate = position.maint_margin_ratio || 0;
+    const maintMarginElement = document.getElementById('maintMargin');
+    
+    // 清除之前的样式
+    maintMarginElement.className = 'value';
+    
+    // 根据保证金率设置颜色和图标
+    let statusIcon = '';
+    let statusClass = '';
+    
+    if (maintMarginRate < 300) {
+        // 危险区域：<300% 即将强平
+        statusClass = 'margin-ratio-danger';
+        statusIcon = '<i class="fas fa-exclamation-triangle margin-icon"></i>';
+    } else if (maintMarginRate < 1000) {
+        // 警告区域：300%-1000% 需要注意
+        statusClass = 'margin-ratio-warning';
+        statusIcon = '<i class="fas fa-exclamation-circle margin-icon"></i>';
+    } else {
+        // 安全区域：>1000% 正常
+        statusClass = 'margin-ratio-safe';
+        statusIcon = '<i class="fas fa-check-circle margin-icon"></i>';
+    }
+    
+    maintMarginElement.className = `value ${statusClass}`;
+    maintMarginElement.innerHTML = `${statusIcon}${maintMarginRate.toFixed(2)}%`;
+    
+    // 强平价格
+    const liqPrice = position.liquidation_price || 0;
+    document.getElementById('liquidationPrice').textContent = `$${liqPrice.toFixed(2)}`;
+    
+    // 盈亏 - 根据正负值设置颜色
+    const unrealizedPnlEl = document.getElementById('unrealizedPnl');
+    const unrealizedPnl = position.unrealized_pnl || 0;
+    unrealizedPnlEl.textContent = `${unrealizedPnl >= 0 ? '+' : ''}$${unrealizedPnl.toFixed(2)}`;
+    // 设置颜色类：正值为绿色，负值为红色
+    unrealizedPnlEl.className = `value pnl ${unrealizedPnl >= 0 ? 'positive' : 'negative'}`;
+    
+    // 计算盈亏比例 - 根据正负值设置颜色
+    const pnlRatio = position.initial_margin > 0 
+        ? (unrealizedPnl / position.initial_margin) * 100 
+        : 0;
+    const pnlRatioEl = document.getElementById('pnlRatio');
+    pnlRatioEl.textContent = `${pnlRatio >= 0 ? '+' : ''}${pnlRatio.toFixed(2)}%`;
+    // 设置颜色类：正值为绿色，负值为红色
+    pnlRatioEl.className = `value pnl ${pnlRatio >= 0 ? 'positive' : 'negative'}`;
+    
+    // 账户余额
+    const totalBalance = position.total_balance || 0;
+    document.getElementById('accountBalance').textContent = `$${totalBalance.toFixed(2)}`;
+    document.getElementById('availableBalance').textContent = `$${(position.free_balance || 0).toFixed(2)}`;
+    
+    // 同步更新资金曲线的当前资金
+    syncEquityCurrentBalance(totalBalance);
+}
+
+// 清空持仓详情
+function clearPositionDetails() {
+    document.getElementById('positionDirection').textContent = '无持仓';
+    document.getElementById('directionDot').className = 'direction-dot';
+    document.getElementById('positionSize').textContent = '0.00 张';
+    document.getElementById('btcQuantity').textContent = '0.0000 BTC';
+    document.getElementById('currentPrice').textContent = '$0.00';
+    document.getElementById('positionValue').textContent = '$0.00';
+    document.getElementById('entryPrice').textContent = '$0.00';
+    document.getElementById('leverage').textContent = '10x';
+    document.getElementById('initialMargin').textContent = '$0.00';
+    const maintMarginElement = document.getElementById('maintMargin');
+    maintMarginElement.className = 'value';
+    maintMarginElement.innerHTML = '0.00%';
+    document.getElementById('liquidationPrice').textContent = '$0.00';
+    // 清空时重置为默认样式
+    const unrealizedPnlEl = document.getElementById('unrealizedPnl');
+    unrealizedPnlEl.textContent = '+$0.00';
+    unrealizedPnlEl.className = 'value pnl';
+    
+    const pnlRatioEl = document.getElementById('pnlRatio');
+    pnlRatioEl.textContent = '+0.00%';
+    pnlRatioEl.className = 'value pnl';
+    document.getElementById('accountBalance').textContent = '$0.00';
+    document.getElementById('availableBalance').textContent = '$0.00';
+}
+
+
+// 添加日志条目（在顶部显示，与交易日志一致）
+function addLogEntry(message, level = 'INFO', icon = 'fas fa-info-circle') {
+    const logContent = document.getElementById('logContent');
+    
+    // 如果日志容器不存在，使用 console.log 作为后备
+    if (!logContent) {
+        console.log(`[${level}] ${message}`);
+        return;
+    }
+    
+    const timestamp = new Date().toLocaleTimeString('zh-CN', { 
+        hour12: false, 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit' 
+    });
+    
+    const logEntry = document.createElement('div');
+    logEntry.className = 'log-entry';
+    
+    // 根据日志级别设置图标和样式
+    let iconHtml = '';
+    if (level === 'INFO') {
+        iconHtml = `<i class="${icon}" style="color: #17a2b8;"></i>`;
+    } else if (level === 'SUCCESS') {
+        iconHtml = `<i class="${icon}" style="color: #28a745;"></i>`;
+    } else if (level === 'WARNING') {
+        iconHtml = `<i class="${icon}" style="color: #ffc107;"></i>`;
+    } else if (level === 'ERROR') {
+        iconHtml = `<i class="${icon}" style="color: #dc3545;"></i>`;
+    }
+    
+    logEntry.innerHTML = `
+        <span class="timestamp">[${timestamp}]</span>
+        ${iconHtml}
+        <span>${message}</span>
+    `;
+    
+    // 在顶部插入（与交易日志显示逻辑一致）
+    if (logContent.firstChild) {
+        logContent.insertBefore(logEntry, logContent.firstChild);
+    } else {
+        logContent.appendChild(logEntry);
+    }
+    
+    // 保持日志条数在合理范围内
+    const entries = logContent.querySelectorAll('.log-entry');
+    if (entries.length > 100) {
+        entries[entries.length - 1].remove();
+    }
+    
+    // 保持在顶部（最新日志可见）
+    logContent.scrollTop = 0;
+}
+
+// 倒计时定时器
+let countdownInterval;
+
+// 启动倒计时（北京时间00, 15, 30, 45分钟）
+function startCountdownTimer() {
+    updateCountdown();
+    // 每秒更新一次倒计时
+    countdownInterval = setInterval(updateCountdown, 1000);
+}
+
+// 更新倒计时显示
+function updateCountdown() {
+    const countdownText = document.getElementById('countdownText');
+    if (!countdownText) return;
+    
+    try {
+        // 获取北京时间（UTC+8）
+        const now = new Date();
+        // 获取UTC时间戳并转换为北京时间
+        const utcTime = now.getTime() + (now.getTimezoneOffset() * 60 * 1000);
+        const beijingTime = new Date(utcTime + (8 * 60 * 60 * 1000));
+        
+        const hours = beijingTime.getHours();
+        const minutes = beijingTime.getMinutes();
+        const seconds = beijingTime.getSeconds();
+        
+        // 计算下一个目标时间（每5分钟：00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55）
+        const targetMinutes = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
+        let nextTarget = null;
+        let nextHour = hours;
+        
+        // 查找下一个目标分钟
+        for (let i = 0; i < targetMinutes.length; i++) {
+            if (targetMinutes[i] > minutes) {
+                nextTarget = targetMinutes[i];
+                break;
+            }
+        }
+        
+        // 如果当前分钟已经过了55，下一个目标是下一小时的00
+        if (nextTarget === null) {
+            nextTarget = 0;
+            nextHour = (hours + 1) % 24;
+        }
+        
+        // 计算剩余时间（秒）
+        const currentTotalSeconds = hours * 3600 + minutes * 60 + seconds;
+        const targetTotalSeconds = nextHour * 3600 + nextTarget * 60;
+        
+        let remainingSeconds = targetTotalSeconds - currentTotalSeconds;
+        
+        // 如果已经过了目标时间（跨天情况），加24小时
+        if (remainingSeconds <= 0) {
+            remainingSeconds += 24 * 3600;
+        }
+        
+        // 转换为分:秒格式
+        const mins = Math.floor(remainingSeconds / 60);
+        const secs = remainingSeconds % 60;
+        
+        // 显示倒计时和目标时间
+        const targetHourStr = nextHour.toString().padStart(2, '0');
+        const targetMinStr = nextTarget.toString().padStart(2, '0');
+        countdownText.textContent = `距离 ${targetHourStr}:${targetMinStr} 还有 ${mins}:${secs.toString().padStart(2, '0')}`;
+        
+        // 如果剩余时间少于1分钟，使用红色高亮
+        if (remainingSeconds < 60) {
+            countdownText.style.color = '#ff6b6b';
+            countdownText.style.fontWeight = 'bold';
+        } else {
+            countdownText.style.color = '#666';
+            countdownText.style.fontWeight = 'normal';
+        }
+    } catch (error) {
+        console.error('倒计时计算错误:', error);
+        countdownText.textContent = '计算中...';
+    }
+}
+
+
+// ==================== 新增：信号准确率和资金曲线功能 ====================
+
+// ECharts 图表实例
+let equityChart = null;
+// ECharts 图表实例
+let signalChart = null;
+
+// 加载信号准确率统计
+async function loadSignalAccuracy() {
+    try {
+        const response = await fetch('/api/signal_accuracy');
+        const data = await response.json();
+        
+        if (data.success) {
+            // 更新统计数字（只显示实盘数据）
+            document.getElementById('totalTrades').textContent = data.total_trades || 0;
+            document.getElementById('winningTrades').textContent = data.winning_trades || 0;
+            document.getElementById('losingTrades').textContent = data.losing_trades || 0;
+            document.getElementById('accuracyRate').textContent = (data.accuracy_rate || 0) + '%';
+            
+            // 更新信号分布图表（使用 ECharts，参考 alpha 项目）
+            const signalChartDom = document.getElementById('signalChart');
+            if (signalChartDom) {
+                // 如果图表实例不存在，创建它
+                if (!signalChart) {
+                    signalChart = echarts.init(signalChartDom);
+                }
+                
+                const signalOption = {
+                    tooltip: { 
+                        trigger: 'item',
+                        formatter: '{b}: {c} ({d}%)'
+                    },
+                    legend: { 
+                        show: false 
+                    },
+                    series: [
+                        {
+                            name: '信号分布',
+                            type: 'pie',
+                            radius: ['45%', '70%'],
+                            itemStyle: { 
+                                borderRadius: 5, 
+                                borderColor: '#fff', 
+                                borderWidth: 2 
+                            },
+                            label: { 
+                                color: '#333',
+                                fontSize: 12
+                            },
+                            data: [
+                                { 
+                                    value: data.signal_distribution.BUY || 0, 
+                                    name: 'BUY',
+                                    itemStyle: { color: '#51cf66' }
+                                },
+                                { 
+                                    value: data.signal_distribution.SELL || 0, 
+                                    name: 'SELL',
+                                    itemStyle: { color: '#ff6b6b' }
+                                },
+                                { 
+                                    value: data.signal_distribution.HOLD || 0, 
+                                    name: 'HOLD',
+                                    itemStyle: { color: '#ffa500' }
+                                }
+                            ]
+                        }
+                    ]
+                };
+                
+                signalChart.setOption(signalOption, true);
+            }
+        }
+    } catch (error) {
+        console.error('加载信号准确率失败:', error);
+    }
+}
+
+// 初始化资金曲线图表（ECharts）
+function initEquityChart() {
+    const chartDom = document.getElementById('equityChart');
+    if (!chartDom) return;
+    
+    // 如果是 canvas，需要改为 div
+    if (chartDom.tagName === 'CANVAS') {
+        const parent = chartDom.parentElement;
+        const newDiv = document.createElement('div');
+        newDiv.id = 'equityChart';
+        newDiv.style.width = '100%';
+        newDiv.style.height = '100%';
+        parent.replaceChild(newDiv, chartDom);
+        equityChart = echarts.init(newDiv);
+    } else {
+        equityChart = echarts.init(chartDom);
+    }
+    
+    // 监听窗口大小变化
+    window.addEventListener('resize', () => {
+        if (equityChart) {
+            equityChart.resize();
+        }
+    });
+}
+
+// 初始化资金曲线时间范围选择器
+function initializeEquityRangeSelector() {
+    const selector = document.getElementById('equityRangeSelector');
+    if (!selector) return;
+    
+    selector.addEventListener('click', (event) => {
+        const btn = event.target.closest('[data-range]');
+        if (!btn) return;
+        
+        currentEquityRange = btn.getAttribute('data-range');
+        
+        // 更新按钮状态
+        selector.querySelectorAll('[data-range]').forEach(b => {
+            b.classList.remove('active');
+        });
+        btn.classList.add('active');
+        
+        // 重新加载资金曲线
+        loadEquityCurve();
+    });
+    
+    // 设置默认选中状态
+    const defaultBtn = selector.querySelector(`[data-range="${currentEquityRange}"]`);
+    if (defaultBtn) {
+        defaultBtn.classList.add('active');
+    }
+}
+
+// 加载资金曲线（优先使用新的overview接口，回退到旧的equity_curve接口）
+async function loadEquityCurve() {
+    try {
+        // 优先尝试使用新的 /api/overview 接口（基于SQLite数据库）
+        let response = await fetch(`/api/overview?range=${currentEquityRange}`);
+        let data = await response.json();
+        
+        if (data.error) {
+            // 如果新接口失败，回退到旧的接口
+            console.warn('使用新接口失败，回退到旧接口:', data.error);
+            response = await fetch('/api/equity_curve');
+            data = await response.json();
+            
+            if (data.success) {
+                // 使用旧接口的数据格式
+                updateEquityStatsOld(data.stats);
+                drawEquityChartOld(data.data);
+            }
+            return;
+        }
+        
+        // 使用新接口的数据格式（多模型支持）
+        if (data.aggregate && data.aggregate_series) {
+            updateEquityStatsNew(data);
+            drawEquityChartNew(data);
+        } else if (data.series && Object.keys(data.series).length > 0) {
+            // 有模型数据，使用第一个模型的数据
+            const firstModelKey = Object.keys(data.series)[0];
+            const modelData = data.series[firstModelKey];
+            updateEquityStatsFromModel(modelData, data.models[firstModelKey]);
+            drawEquityChartFromSeries(modelData);
+        }
+    } catch (error) {
+        console.error('加载资金曲线失败:', error);
+        // 回退到旧接口
+    try {
+        const response = await fetch('/api/equity_curve');
+        const data = await response.json();
+        if (data.success) {
+                updateEquityStatsOld(data.stats);
+                drawEquityChartOld(data.data);
+            }
+        } catch (fallbackError) {
+            console.error('回退接口也失败:', fallbackError);
+        }
+    }
+}
+
+// 更新统计信息（新接口格式）
+function updateEquityStatsNew(data) {
+    const aggregate = data.aggregate || {};
+    const totalEquity = aggregate.total_equity || 0;
+    
+    // 计算初始资金（从第一个数据点获取）
+    let initialBalance = totalEquity;
+    let maxBalance = totalEquity;
+    let minBalance = totalEquity;
+    
+    if (data.aggregate_series && data.aggregate_series.length > 0) {
+        const firstPoint = data.aggregate_series[0];
+        const values = Object.values(firstPoint).filter(v => typeof v === 'number' && v > 0);
+        if (values.length > 0) {
+            initialBalance = values.reduce((a, b) => a + b, 0);
+        }
+        
+        // 计算最大最小值
+        data.aggregate_series.forEach(point => {
+            const pointTotal = Object.values(point).filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
+            if (pointTotal > maxBalance) maxBalance = pointTotal;
+            if (pointTotal < minBalance) minBalance = pointTotal;
+        });
+    }
+    
+    const currentBalance = totalEquity;
+    const totalReturn = ((currentBalance - initialBalance) / initialBalance * 100) || 0;
+    
+    // 计算最大回撤
+    let maxDrawdown = 0;
+    let peak = initialBalance;
+    if (data.aggregate_series) {
+        data.aggregate_series.forEach(point => {
+            const pointTotal = Object.values(point).filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
+            if (pointTotal > peak) peak = pointTotal;
+            const drawdown = ((pointTotal - peak) / peak * 100) || 0;
+            if (drawdown < maxDrawdown) maxDrawdown = drawdown;
+        });
+    }
+    
+    updateEquityStatsDisplay(initialBalance, currentBalance, totalReturn, maxDrawdown);
+}
+
+// 从单个模型数据更新统计
+function updateEquityStatsFromModel(modelData, modelSummary) {
+    if (!modelData || modelData.length === 0) return;
+    
+    const initialBalance = modelData[0].total_equity || 0;
+    const latest = modelData[modelData.length - 1];
+    const currentBalance = latest.total_equity || 0;
+    const totalReturn = ((currentBalance - initialBalance) / initialBalance * 100) || 0;
+    
+    // 计算最大回撤
+    let maxDrawdown = 0;
+    let peak = initialBalance;
+    modelData.forEach(point => {
+        const equity = point.total_equity || 0;
+        if (equity > peak) peak = equity;
+        const drawdown = ((equity - peak) / peak * 100) || 0;
+        if (drawdown < maxDrawdown) maxDrawdown = drawdown;
+    });
+    
+    updateEquityStatsDisplay(initialBalance, currentBalance, totalReturn, maxDrawdown);
+}
+
+// 更新统计信息（旧接口格式）
+function updateEquityStatsOld(stats) {
+    updateEquityStatsDisplay(
+        stats.initial_balance || 0,
+        stats.current_balance || 0,
+        stats.total_return || 0,
+        stats.max_drawdown || 0
+    );
+}
+
+// 同步资金曲线的当前资金（从持仓数据）
+function syncEquityCurrentBalance(totalBalance) {
+    const currentBalanceEl = document.getElementById('currentBalance');
+    const initialBalanceEl = document.getElementById('initialBalance');
+    const totalReturnEl = document.getElementById('totalReturn');
+    
+    if (currentBalanceEl && totalBalance > 0) {
+        currentBalanceEl.textContent = '$' + totalBalance.toFixed(2);
+        
+        // 重新计算收益率
+        if (initialBalanceEl) {
+            const initialText = initialBalanceEl.textContent.replace('$', '').replace(',', '');
+            const initialValue = parseFloat(initialText);
+            if (!isNaN(initialValue) && initialValue > 0) {
+                const actualReturnPct = ((totalBalance - initialValue) / initialValue * 100) || 0;
+                if (totalReturnEl) {
+                    totalReturnEl.textContent = (actualReturnPct >= 0 ? '+' : '') + actualReturnPct.toFixed(2) + '%';
+                    totalReturnEl.style.color = actualReturnPct >= 0 ? '#51cf66' : '#ff6b6b';
+                }
+            }
+        }
+    }
+}
+
+// 统一更新统计信息显示
+function updateEquityStatsDisplay(initial, current, returnPct, drawdown) {
+    document.getElementById('initialBalance').textContent = '$' + initial.toFixed(2);
+    
+    // 优先使用持仓数据中的账户余额作为当前资金
+    const accountBalanceEl = document.getElementById('accountBalance');
+    let actualCurrent = current;
+    if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+        // 从持仓详情中获取账户余额
+        const balanceText = accountBalanceEl.textContent.replace('$', '').replace(',', '');
+        const balanceValue = parseFloat(balanceText);
+        if (!isNaN(balanceValue) && balanceValue > 0) {
+            actualCurrent = balanceValue;
+        }
+    }
+    
+    document.getElementById('currentBalance').textContent = '$' + actualCurrent.toFixed(2);
+    
+    // 重新计算收益率（使用实际当前资金）
+    const actualReturnPct = ((actualCurrent - initial) / initial * 100) || 0;
+    const totalReturnEl = document.getElementById('totalReturn');
+    totalReturnEl.textContent = (actualReturnPct >= 0 ? '+' : '') + actualReturnPct.toFixed(2) + '%';
+    totalReturnEl.style.color = actualReturnPct >= 0 ? '#51cf66' : '#ff6b6b';
+            
+    const maxDrawdownEl = document.getElementById('maxDrawdown');
+    maxDrawdownEl.textContent = drawdown.toFixed(2) + '%';
+    maxDrawdownEl.style.color = drawdown < -10 ? '#ff6b6b' : '#ffa500';
+}
+
+// 绘制图表（新接口格式 - 多模型）
+function drawEquityChartNew(data) {
+    if (!equityChart) {
+        initEquityChart();
+    }
+    
+    if (!equityChart) return;
+    
+    // 如果有aggregate_series，绘制总金额曲线
+    if (data.aggregate_series && data.aggregate_series.length > 0) {
+        // 处理数据，标记资金变化的点
+        const processedData = [];
+        let prevValue = null;
+        
+        data.aggregate_series.forEach((item, index) => {
+            const total = Object.values(item).filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
+            // 确保时间戳是数字格式
+            const timestamp = typeof item.timestamp === 'string' ? new Date(item.timestamp).getTime() : item.timestamp;
+            
+            // 判断是否是资金变化的点（与上一个点不同，或者是第一个点）
+            const isChanged = prevValue === null || Math.abs(total - prevValue) > 0.01;
+            
+            processedData.push({
+                value: [timestamp, total],
+                isChanged: isChanged
+            });
+            
+            prevValue = total;
+        });
+        
+        // 添加当前资金作为最新数据点（如果与最后一个点不同）
+        const accountBalanceEl = document.getElementById('accountBalance');
+        if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+            const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
+            const currentBalance = parseFloat(balanceText);
+            if (!isNaN(currentBalance) && currentBalance > 0) {
+                const lastValue = processedData[processedData.length - 1]?.value[1];
+                if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
+                    // 当前资金与最后一个数据点不同，添加当前资金点
+                    const now = new Date().getTime();
+                    processedData.push({
+                        value: [now, currentBalance],
+                        isChanged: true
+                    });
+                }
+            }
+        }
+        
+        const seriesData = processedData.map(item => item.value);
+        
+        const option = {
+            tooltip: {
+                trigger: 'axis',
+                formatter: (params) => {
+                    if (!params || !params[0]) return '';
+                    const time = new Date(params[0].data[0]);
+                    const hours = time.getHours().toString().padStart(2, '0');
+                    const minutes = time.getMinutes().toString().padStart(2, '0');
+                    const timeStr = `${hours}:${minutes}`;
+                    return `${timeStr}<br/>总权益: $${params[0].data[1].toFixed(2)}`;
+                },
+                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                borderColor: '#667eea',
+                borderWidth: 1,
+                textStyle: {
+                    color: '#fff'
+                }
+            },
+            grid: { 
+                left: 40, 
+                right: 20, 
+                top: 30, 
+                bottom: 40 
+            },
+            xAxis: {
+                type: 'time',
+                axisLabel: { 
+                    color: '#666',
+                    rotate: 45,
+                    formatter: (value) => {
+                        const date = new Date(value);
+                        const hours = date.getHours().toString().padStart(2, '0');
+                        const minutes = date.getMinutes().toString().padStart(2, '0');
+                        return `${hours}:${minutes}`;
+                    }
+                }
+            },
+            yAxis: {
+                type: 'value',
+                axisLabel: { 
+                    color: '#666',
+                    formatter: (value) => `$${value.toFixed(0)}`
+                },
+                splitLine: {
+                    lineStyle: {
+                        color: 'rgba(0, 0, 0, 0.05)'
+                    }
+                }
+            },
+            series: [
+                {
+                    name: '总权益',
+                    type: 'line',
+                    smooth: true,
+                    showSymbol: false,
+                    symbol: 'circle',
+                    symbolSize: (value, params) => {
+                        // 只在资金变化的点显示锚点
+                        return processedData[params.dataIndex]?.isChanged ? 4 : 0;
+                    },
+                    data: seriesData,
+                    lineStyle: {
+                        color: '#667eea',
+                        width: 2
+                    },
+                    itemStyle: {
+                        color: '#667eea',
+                        borderColor: '#fff',
+                        borderWidth: 1
+                    },
+                    areaStyle: {
+                        color: {
+                            type: 'linear',
+                            x: 0,
+                            y: 0,
+                            x2: 0,
+                            y2: 1,
+                            colorStops: [
+                                { offset: 0, color: 'rgba(102, 126, 234, 0.3)' },
+                                { offset: 1, color: 'rgba(102, 126, 234, 0.05)' }
+                            ]
+                        }
+                    },
+                    emphasis: {
+                        focus: 'series',
+                        showSymbol: true,
+                        symbolSize: (value, params) => {
+                            // 鼠标悬停时，只在资金变化的点显示锚点
+                            return processedData[params.dataIndex]?.isChanged ? 6 : 0;
+                        },
+                        itemStyle: {
+                            color: '#667eea',
+                            borderColor: '#fff',
+                            borderWidth: 2
+                        },
+                        lineStyle: {
+                            width: 3
+                        }
+                    }
+                }
+            ]
+        };
+        
+        equityChart.setOption(option, true);
+    }
+}
+
+// 从单个模型系列绘制图表
+function drawEquityChartFromSeries(seriesData) {
+    if (!equityChart) {
+        initEquityChart();
+    }
+    
+    if (!equityChart) return;
+    
+    // 处理数据，标记资金变化的点
+    const processedData = [];
+    let prevValue = null;
+    
+    seriesData.forEach((item, index) => {
+        const total = item.total_equity || 0;
+        // 确保时间戳是数字格式
+        const timestamp = typeof item.timestamp === 'string' ? new Date(item.timestamp).getTime() : item.timestamp;
+        
+        // 判断是否是资金变化的点（与上一个点不同，或者是第一个点）
+        const isChanged = prevValue === null || Math.abs(total - prevValue) > 0.01;
+        
+        processedData.push({
+            value: [timestamp, total],
+            isChanged: isChanged
+        });
+        
+        prevValue = total;
+    });
+    
+    // 添加当前资金作为最新数据点（如果与最后一个点不同）
+    const accountBalanceEl = document.getElementById('accountBalance');
+    if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+        const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
+        const currentBalance = parseFloat(balanceText);
+        if (!isNaN(currentBalance) && currentBalance > 0) {
+            const lastValue = processedData[processedData.length - 1]?.value[1];
+            if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
+                // 当前资金与最后一个数据点不同，添加当前资金点
+                const now = new Date().getTime();
+                processedData.push({
+                    value: [now, currentBalance],
+                    isChanged: true
+                });
+            }
+        }
+    }
+    
+    const seriesDataPoints = processedData.map(item => item.value);
+    
+    const option = {
+        tooltip: {
+            trigger: 'axis',
+            formatter: (params) => {
+                if (!params || !params[0]) return '';
+                const time = new Date(params[0].data[0]);
+                const hours = time.getHours().toString().padStart(2, '0');
+                const minutes = time.getMinutes().toString().padStart(2, '0');
+                const timeStr = `${hours}:${minutes}`;
+                return `${timeStr}<br/>总权益: $${params[0].data[1].toFixed(2)}`;
+            },
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            borderColor: '#667eea',
+            borderWidth: 1,
+            textStyle: {
+                color: '#fff'
+            }
+        },
+        grid: { 
+            left: 40, 
+            right: 20, 
+            top: 30, 
+            bottom: 40 
+        },
+        xAxis: {
+            type: 'time',
+            axisLabel: { 
+                color: '#666',
+                rotate: 45,
+                formatter: (value) => {
+                    const date = new Date(value);
+                    const hours = date.getHours().toString().padStart(2, '0');
+                    const minutes = date.getMinutes().toString().padStart(2, '0');
+                    return `${hours}:${minutes}`;
+                }
+            }
+        },
+        yAxis: {
+            type: 'value',
+            axisLabel: { 
+                color: '#666',
+                formatter: (value) => `$${value.toFixed(0)}`
+            },
+            splitLine: {
+                lineStyle: {
+                    color: 'rgba(0, 0, 0, 0.05)'
+                }
+            }
+        },
+        series: [
+            {
+                name: '账户余额',
+                type: 'line',
+                smooth: true,
+                showSymbol: false,
+                symbol: 'circle',
+                symbolSize: (value, params) => {
+                    // 只在资金变化的点显示锚点
+                    return processedData[params.dataIndex]?.isChanged ? 4 : 0;
+                },
+                data: seriesDataPoints,
+                lineStyle: {
+                    color: '#667eea',
+                    width: 2
+                },
+                itemStyle: {
+                    color: '#667eea',
+                    borderColor: '#fff',
+                    borderWidth: 1
+                },
+                areaStyle: {
+                    color: {
+                        type: 'linear',
+                        x: 0,
+                        y: 0,
+                        x2: 0,
+                        y2: 1,
+                        colorStops: [
+                            { offset: 0, color: 'rgba(102, 126, 234, 0.3)' },
+                            { offset: 1, color: 'rgba(102, 126, 234, 0.05)' }
+                        ]
+                    }
+                },
+                emphasis: {
+                    focus: 'series',
+                    showSymbol: true,
+                    symbolSize: (value, params) => {
+                        // 鼠标悬停时，只在资金变化的点显示锚点
+                        return processedData[params.dataIndex]?.isChanged ? 6 : 0;
+                    },
+                    itemStyle: {
+                        color: '#667eea',
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    lineStyle: {
+                        width: 3
+                    }
+                }
+            }
+        ]
+    };
+    
+    equityChart.setOption(option, true);
+}
+
+// 绘制图表（旧接口格式）
+function drawEquityChartOld(equityData) {
+    if (!equityChart) {
+        initEquityChart();
+    }
+    
+    if (!equityChart) return;
+    
+    // 处理数据，标记资金变化的点
+    const processedData = [];
+    let prevValue = null;
+    
+    equityData.forEach((item, index) => {
+        const balance = item.balance;
+        // 确保时间戳是数字格式
+        const timestamp = typeof item.timestamp === 'string' ? new Date(item.timestamp).getTime() : item.timestamp;
+        
+        // 判断是否是资金变化的点（与上一个点不同，或者是第一个点）
+        const isChanged = prevValue === null || Math.abs(balance - prevValue) > 0.01;
+        
+        processedData.push({
+            value: [timestamp, balance],
+            isChanged: isChanged
+        });
+        
+        prevValue = balance;
+    });
+    
+    // 添加当前资金作为最新数据点（如果与最后一个点不同）
+    const accountBalanceEl = document.getElementById('accountBalance');
+    if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+        const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
+        const currentBalance = parseFloat(balanceText);
+        if (!isNaN(currentBalance) && currentBalance > 0) {
+            const lastValue = processedData[processedData.length - 1]?.value[1];
+            if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
+                // 当前资金与最后一个数据点不同，添加当前资金点
+                const now = new Date().getTime();
+                processedData.push({
+                    value: [now, currentBalance],
+                    isChanged: true
+                });
+            }
+        }
+    }
+    
+    const seriesData = processedData.map(item => item.value);
+    
+    const option = {
+        tooltip: {
+            trigger: 'axis',
+            formatter: (params) => {
+                if (!params || !params[0]) return '';
+                const time = new Date(params[0].data[0]);
+                const hours = time.getHours().toString().padStart(2, '0');
+                const minutes = time.getMinutes().toString().padStart(2, '0');
+                const timeStr = `${hours}:${minutes}`;
+                return `${timeStr}<br/>账户余额: $${params[0].data[1].toFixed(2)}`;
+            },
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            borderColor: '#667eea',
+            borderWidth: 1,
+            textStyle: {
+                color: '#fff'
+            }
+        },
+        grid: { 
+            left: 40, 
+            right: 20, 
+            top: 30, 
+            bottom: 40 
+        },
+        xAxis: {
+            type: 'time',
+            axisLabel: { 
+                color: '#666',
+                rotate: 45,
+                formatter: (value) => {
+                    const date = new Date(value);
+                    return date.toLocaleString('zh-CN', { 
+                        month: 'short', 
+                        day: 'numeric', 
+                        hour: '2-digit'
+                    });
+                }
+            }
+        },
+        yAxis: {
+            type: 'value',
+            axisLabel: { 
+                color: '#666',
+                formatter: (value) => `$${value.toFixed(0)}`
+            },
+            splitLine: {
+                lineStyle: {
+                    color: 'rgba(0, 0, 0, 0.05)'
+                }
+            }
+        },
+        series: [
+            {
+                name: '账户余额',
+                type: 'line',
+                smooth: true,
+                showSymbol: false,
+                symbol: 'circle',
+                symbolSize: (value, params) => {
+                    // 只在资金变化的点显示锚点
+                    return processedData[params.dataIndex]?.isChanged ? 4 : 0;
+                },
+                data: seriesData,
+                lineStyle: {
+                    color: '#667eea',
+                    width: 2
+                },
+                itemStyle: {
+                    color: '#667eea',
+                    borderColor: '#fff',
+                    borderWidth: 1
+                },
+                areaStyle: {
+                    color: {
+                        type: 'linear',
+                        x: 0,
+                        y: 0,
+                        x2: 0,
+                        y2: 1,
+                        colorStops: [
+                            { offset: 0, color: 'rgba(102, 126, 234, 0.3)' },
+                            { offset: 1, color: 'rgba(102, 126, 234, 0.05)' }
+                        ]
+                    }
+                },
+                emphasis: {
+                    focus: 'series',
+                    showSymbol: true,
+                    symbolSize: (value, params) => {
+                        // 鼠标悬停时，只在资金变化的点显示锚点
+                        return processedData[params.dataIndex]?.isChanged ? 6 : 0;
+                    },
+                    itemStyle: {
+                        color: '#667eea',
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    lineStyle: {
+                        width: 3
+                    }
+                }
+            }
+        ]
+    };
+    
+    equityChart.setOption(option, true);
+}
+
+// getChartOptions 函数已移除，现在使用 ECharts 配置
+
+// 保留旧的函数名作为别名（向后兼容）
+function drawEquityChart(equityData) {
+    drawEquityChartOld(equityData);
+}
+
+// 加载AI决策历史
+async function loadAIDecisions() {
+    const container = document.getElementById('aiDecisionList');
+    if (!container) {
+        console.error('AI决策容器不存在');
+        return;
+    }
+    
+    try {
+        // 不传递 symbol 参数，获取所有交易对的合并数据
+        const response = await fetch('/api/ai_decisions');
+        
+        if (!response.ok) {
+            throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
+        }
+        
+        const decisions = await response.json();
+        
+        console.log('AI决策数据:', decisions);
+        console.log('AI决策数据类型:', typeof decisions);
+        console.log('AI决策数据长度:', Array.isArray(decisions) ? decisions.length : '不是数组');
+        
+        // 检查返回的数据格式
+        if (!Array.isArray(decisions)) {
+            console.error('AI决策数据格式错误，期望数组，实际:', typeof decisions, decisions);
+            // 如果容器已有内容，保留它；否则显示空状态
+            if (!container.innerHTML || container.innerHTML.includes('加载失败')) {
+                container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">暂无AI决策记录</div>';
+            }
+            return;
+        }
+
+        if (decisions.length === 0) {
+            console.warn('AI决策数据为空数组');
+            container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">暂无AI决策记录</div>';
+            return;
+        }
+        
+        console.log('准备显示', decisions.length, '条AI决策记录');
+        console.log('第一条决策:', decisions[0]);
+
+        // 数据已经是按时间倒序排列的（最新的在前），直接取前10条显示
+        container.innerHTML = decisions.slice(0, 10).map((decision) => {
+            const signal = (decision.signal || 'HOLD').toUpperCase();
+            const confidence = (decision.confidence || 'MEDIUM').toUpperCase();
+            const reason = decision.reason || '无理由说明';
+            const price = (decision.price || 0).toFixed(2);
+            const timestamp = decision.timestamp || '--';
+            
+            return `
+                <div class="ai-decision-card">
+                    <div class="decision-header">
+                        <span class="decision-signal decision-signal-${signal.toLowerCase()}">${signal}</span>
+                        <span class="decision-confidence decision-confidence-${confidence.toLowerCase()}">${confidence}</span>
+                    </div>
+                    <div class="decision-body">
+                        <div class="decision-reason">${reason}</div>
+                        <div class="decision-details">价格:$${price} 时间:${timestamp}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('加载AI决策失败:', error);
+        // 只有在容器为空或显示错误时才更新，避免覆盖已有数据
+        const currentContent = container.innerHTML;
+        if (!currentContent || currentContent.includes('加载失败') || currentContent.includes('加载中')) {
+            container.innerHTML = '<div style="text-align: center; color: #ff6b6b; padding: 20px;">加载失败: ' + error.message + '</div>';
+        } else {
+            // 保留现有内容，只记录错误
+            console.warn('AI决策加载失败，保留现有数据显示');
+        }
+    }
+}
+
+// 加载交易记录
+async function loadTrades() {
+    const container = document.getElementById('tradeHistory');
+    if (!container) {
+        console.error('交易记录容器不存在');
+        return;
+    }
+    
+    try {
+        // 不传递 symbol 参数，获取所有交易对的合并数据
+        const response = await fetch('/api/trades');
+        
+        if (!response.ok) {
+            throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
+        }
+        
+        const trades = await response.json();
+        
+        console.log('交易记录数据:', trades);
+        
+        // 检查返回的数据格式
+        if (!Array.isArray(trades)) {
+            console.error('交易记录数据格式错误，期望数组，实际:', typeof trades, trades);
+            // 如果容器已有内容，保留它；否则显示空状态
+            if (!container.innerHTML || container.innerHTML.includes('加载失败')) {
+                container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">暂无交易记录</div>';
+            }
+            return;
+        }
+
+        if (trades.length === 0) {
+            container.innerHTML = '<div style="text-align: center; color: #999; padding: 20px;">暂无交易记录</div>';
+            return;
+        }
+
+        // 数据已经是按时间倒序排列的（最新的在前），直接显示所有数据
+        container.innerHTML = trades.map((trade) => {
+            const sideColor = trade.side === 'long' || trade.side === 'buy' ? '#51cf66' : 
+                            trade.side === 'short' || trade.side === 'sell' ? '#ff6b6b' : '#999';
+            const pnlColor = trade.pnl > 0 ? '#51cf66' : trade.pnl < 0 ? '#ff6b6b' : '#999';
+            const pnlDisplay = trade.pnl > 0 ? '+' : '';
+            const pnlValue = (trade.pnl || 0).toFixed(2);
+            const pnlRatioText = trade.pnlRatio !== undefined && trade.pnlRatio !== 0 
+                ? ` (${(trade.pnlRatio * 100).toFixed(2)}%)` 
+                : '';
+            
+            // 如果有开仓价和平仓价，显示更详细的信息
+            const hasOpenClose = trade.openAvgPx !== undefined && trade.closeAvgPx !== undefined;
+            const priceDisplay = hasOpenClose 
+                ? `开: $${(trade.openAvgPx || 0).toFixed(2)} → 平: $${(trade.closeAvgPx || trade.price || 0).toFixed(2)}`
+                : `$${(trade.price || 0).toFixed(2)}`;
+            
+            return `
+                <div class="trade-item" style="padding: 12px; margin-bottom: 12px; border-left: 4px solid ${sideColor}; background: #f9f9f9; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="padding: 4px 10px; background: ${sideColor}; color: white; border-radius: 4px; font-size: 12px; font-weight: bold;">${(trade.side || '--').toUpperCase()}</span>
+                        <span style="font-weight: bold; color: ${pnlColor}; font-size: 16px; font-weight: 700;">
+                            ${pnlDisplay}${pnlValue} USDT${pnlRatioText}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <span style="font-weight: 600; color: ${sideColor}; font-size: 13px;">${priceDisplay}</span>
+                        <span style="font-size: 11px; color: #666;">${trade.timestamp || '--'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                        <span>数量: ${(trade.amount || 0).toFixed(4)}</span>
+                        <span>杠杆: ${trade.leverage || '--'}x</span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('加载交易记录失败:', error);
+        // 只有在容器为空或显示错误时才更新，避免覆盖已有数据
+        const currentContent = container.innerHTML;
+        if (!currentContent || currentContent.includes('加载失败') || currentContent.includes('加载中')) {
+            container.innerHTML = '<div style="text-align: center; color: #ff6b6b; padding: 20px;">加载失败: ' + error.message + '</div>';
+        } else {
+            // 保留现有内容，只记录错误
+            console.warn('交易记录加载失败，保留现有数据显示');
+        }
+    }
+}
+
+
+// 更新新功能数据
+// 防止并发请求的标志
+let isLoadingAIDecisions = false;
+let isLoadingTrades = false;
+
+function updateNewFeatures() {
+    // 使用 Promise.all 并行加载，但避免重复请求
+    const promises = [];
+    
+    if (!isLoadingAIDecisions) {
+        isLoadingAIDecisions = true;
+        promises.push(
+            loadAIDecisions().finally(() => {
+                isLoadingAIDecisions = false;
+            })
+        );
+    }
+    
+    if (!isLoadingTrades) {
+        isLoadingTrades = true;
+        promises.push(
+            loadTrades().finally(() => {
+                isLoadingTrades = false;
+            })
+        );
+    }
+    
+    // 其他功能可以并行加载
+    loadSignalAccuracy();
+    loadEquityCurve();
+    
+    // 等待异步操作完成
+    Promise.all(promises).catch(error => {
+        console.error('更新新功能数据失败:', error);
+    });
+}
+
+// 修改原有的loadInitialData函数，添加新功能加载
+const originalLoadInitialData = loadInitialData;
+loadInitialData = function() {
+    originalLoadInitialData();
+    updateNewFeatures();
+};
+
+// 修改原有的自动刷新，添加新功能
+const originalStartAutoRefresh = startAutoRefresh;
+startAutoRefresh = function() {
+    originalStartAutoRefresh();
+    
+    // 每30秒刷新一次统计数据
+    setInterval(() => {
+        if (document.getElementById('autoRefresh').checked) {
+            updateNewFeatures();
+        }
+    }, 30000);
+};
+
+// 页面卸载时清理
+window.addEventListener('beforeunload', function() {
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+    }
+    if (runningTimeInterval) {
+        clearInterval(runningTimeInterval);
+    }
+    if (socket) {
+        socket.disconnect();
+    }
+});
