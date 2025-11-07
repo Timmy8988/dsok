@@ -146,33 +146,183 @@ socketio = SocketIO(
     async_mode='threading',
     ping_timeout=60,  # WebSocket ping 超时时间（秒）
     ping_interval=25,  # WebSocket ping 间隔（秒）
-    max_http_buffer_size=1e6  # 最大 HTTP 缓冲区大小
+    max_http_buffer_size=1e6,  # 最大 HTTP 缓冲区大小
+    allow_upgrades=True,  # 允许协议升级
+    transports=['polling', 'websocket']  # 支持的传输方式
 )
 
 # 安全配置
 RATE_LIMIT = {}  # 简单的速率限制
-MAX_REQUESTS_PER_MINUTE = 60
+MAX_REQUESTS_PER_MINUTE = 120  # 增加默认限制到每分钟120次
+MAX_REQUESTS_PER_MINUTE_READONLY = 300  # 只读端点（如状态查询）允许更高的限制
+
+# 简单缓存配置（用于变化不频繁的数据）
+SIMPLE_CACHE = {}  # 简单的内存缓存
+CACHE_TTL = 30  # 缓存有效期（秒）
 
 # 安全装饰器
-def rate_limit(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        client_ip = request.remote_addr
-        current_time = time.time()
-        
-        if client_ip in RATE_LIMIT:
-            if current_time - RATE_LIMIT[client_ip]['last_request'] < 60:
-                if RATE_LIMIT[client_ip]['count'] >= MAX_REQUESTS_PER_MINUTE:
-                    logger.warning(f"Rate limit exceeded for IP: {client_ip}")
-                    return jsonify({'error': 'Rate limit exceeded'}), 429
-                RATE_LIMIT[client_ip]['count'] += 1
+def rate_limit(max_requests=None):
+    """
+    速率限制装饰器
+    
+    Args:
+        max_requests: 自定义的最大请求数，如果为 None 则使用默认值
+    """
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            client_ip = request.remote_addr
+            current_time = time.time()
+            
+            # 确定该端点的最大请求数
+            endpoint_max = max_requests if max_requests is not None else MAX_REQUESTS_PER_MINUTE
+            
+            # 检查是否是只读端点（GET 请求且路径包含特定关键词）
+            if request.method == 'GET':
+                path = request.path.lower()
+                # 扩展只读端点列表，包括所有查询类端点
+                readonly_keywords = [
+                    '/api/overview', '/api/bot_status', '/api/equity_curve', 
+                    '/api/status', '/api/trades', '/api/signals', '/api/signal_accuracy',
+                    '/api/models', '/api/ai_decisions', '/api/dashboard', 
+                    '/api/kline', '/api/profit_curve', '/api/ai_model_info'
+                ]
+                if any(keyword in path for keyword in readonly_keywords):
+                    endpoint_max = MAX_REQUESTS_PER_MINUTE_READONLY
+            
+            if client_ip in RATE_LIMIT:
+                # 检查时间窗口
+                time_diff = current_time - RATE_LIMIT[client_ip]['last_request']
+                if time_diff < 60:
+                    # 在同一分钟内
+                    if RATE_LIMIT[client_ip]['count'] >= endpoint_max:
+                        # 只在第一次超过限制时记录警告，避免日志过多
+                        if not RATE_LIMIT[client_ip].get('warned', False):
+                            logger.warning(f"Rate limit exceeded for IP: {client_ip} on {request.path} (limit: {endpoint_max}/min)")
+                            RATE_LIMIT[client_ip]['warned'] = True
+                        return jsonify({'error': 'Rate limit exceeded', 'retry_after': 60}), 429
+                    RATE_LIMIT[client_ip]['count'] += 1
+                else:
+                    # 新的时间窗口，重置计数
+                    RATE_LIMIT[client_ip] = {'count': 1, 'last_request': current_time, 'warned': False}
             else:
-                RATE_LIMIT[client_ip] = {'count': 1, 'last_request': current_time}
-        else:
-            RATE_LIMIT[client_ip] = {'count': 1, 'last_request': current_time}
+                # 新 IP，初始化
+                RATE_LIMIT[client_ip] = {'count': 1, 'last_request': current_time, 'warned': False}
+            
+            # 定期清理过期的速率限制记录（每100次请求清理一次，避免性能影响）
+            if len(RATE_LIMIT) > 1000:
+                cleanup_rate_limit()
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    
+    # 如果直接作为装饰器使用（没有参数），返回装饰器函数
+    if callable(max_requests):
+        # 直接使用 @rate_limit 的情况
+        f = max_requests
+        max_requests = None
+        return decorator(f)
+    
+    # 使用 @rate_limit(max_requests=xxx) 的情况
+    return decorator
+
+def cleanup_rate_limit():
+    """清理过期的速率限制记录（超过5分钟未活动的记录）"""
+    try:
+        current_time = time.time()
+        expired_ips = []
+        for ip, data in RATE_LIMIT.items():
+            # 如果超过5分钟未活动，删除记录
+            if current_time - data['last_request'] > 300:
+                expired_ips.append(ip)
         
-        return f(*args, **kwargs)
-    return decorated_function
+        for ip in expired_ips:
+            del RATE_LIMIT[ip]
+        
+        if expired_ips:
+            logger.debug(f"清理了 {len(expired_ips)} 个过期的速率限制记录")
+    except Exception as e:
+        logger.error(f"清理速率限制记录时出错: {e}")
+
+def simple_cache(ttl=CACHE_TTL):
+    """
+    简单的内存缓存装饰器
+    
+    Args:
+        ttl: 缓存有效期（秒），默认30秒
+    """
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # 生成缓存键（基于函数名和参数）
+            cache_key = f"{f.__name__}:{str(args)}:{str(sorted(kwargs.items()))}"
+            current_time = time.time()
+            
+            # 检查缓存
+            if cache_key in SIMPLE_CACHE:
+                cached_data, cached_time = SIMPLE_CACHE[cache_key]
+                if current_time - cached_time < ttl:
+                    # 缓存有效，直接返回
+                    return cached_data
+            
+            # 缓存无效或不存在，执行函数
+            result = f(*args, **kwargs)
+            
+            # 存储到缓存
+            SIMPLE_CACHE[cache_key] = (result, current_time)
+            
+            # 定期清理过期缓存（当缓存项超过100时）
+            if len(SIMPLE_CACHE) > 100:
+                cleanup_cache()
+            
+            return result
+        return decorated_function
+    
+    # 如果直接作为装饰器使用（没有参数）
+    if callable(ttl):
+        f = ttl
+        ttl = CACHE_TTL
+        return decorator(f)
+    
+    return decorator
+
+def cleanup_cache():
+    """清理过期的缓存记录"""
+    try:
+        current_time = time.time()
+        expired_keys = []
+        for key, (_, cached_time) in SIMPLE_CACHE.items():
+            if current_time - cached_time > CACHE_TTL * 2:  # 清理超过2倍TTL的缓存
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            del SIMPLE_CACHE[key]
+        
+        if expired_keys:
+            logger.debug(f"清理了 {len(expired_keys)} 个过期的缓存记录")
+    except Exception as e:
+        logger.error(f"清理缓存时出错: {e}")
+
+# SocketIO 错误处理装饰器
+def socketio_error_handler(f):
+    """装饰器：处理 SocketIO 事件中的异常，特别是会话断开错误"""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except KeyError as e:
+            # 捕获 'Session is disconnected' 等会话相关错误
+            if 'Session is disconnected' in str(e) or 'disconnected' in str(e).lower():
+                # 会话已断开，静默处理（避免日志噪音）
+                return
+            raise
+        except Exception as e:
+            # 其他异常记录日志
+            logger.error(f"SocketIO 事件处理错误: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return
+    return wrapper
 
 # 错误处理
 @app.errorhandler(400)
@@ -213,8 +363,17 @@ def rate_limit_exceeded(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    # 检查是否是 SocketIO 会话断开错误
+    error_str = str(error)
+    if 'Session is disconnected' in error_str or 'disconnected' in error_str.lower():
+        # SocketIO 会话断开，返回空响应（避免日志噪音）
+        return '', 200
     logger.error(f"Internal error: {error}")
     return jsonify({'error': 'Internal server error'}), 500
+
+# 注意：全局异常处理器可能会干扰正常的错误处理流程
+# 只在必要时使用，主要用于捕获 SocketIO 中间件层面的异常
+# Flask 的错误处理器按优先级匹配，更具体的处理器会优先执行
 
 # 配置文件路径
 BOT_CONFIG_FILE = os.path.join(BASE_DIR, 'bot_config.json')
@@ -229,8 +388,34 @@ def load_trade_stats():
     """从文件加载交易统计信息"""
     try:
         if os.path.exists(TRADE_STATS_FILE):
+            # 检查文件是否为空
+            if os.path.getsize(TRADE_STATS_FILE) == 0:
+                logger.warning(f"⚠️ 交易统计文件为空，使用默认值: {TRADE_STATS_FILE}")
+                default_stats = {
+                    'total_trades': 0,
+                    'winning_trades': 0,
+                    'losing_trades': 0,
+                    'last_updated': None
+                }
+                save_trade_stats(default_stats)
+                return default_stats
+            
             with open(TRADE_STATS_FILE, 'r', encoding='utf-8') as f:
-                stats = json.load(f)
+                content = f.read().strip()
+                # 如果文件内容为空或只有空白字符
+                if not content:
+                    logger.warning(f"⚠️ 交易统计文件内容为空，使用默认值: {TRADE_STATS_FILE}")
+                    default_stats = {
+                        'total_trades': 0,
+                        'winning_trades': 0,
+                        'losing_trades': 0,
+                        'last_updated': None
+                    }
+                    save_trade_stats(default_stats)
+                    return default_stats
+                
+                # 尝试解析 JSON
+                stats = json.loads(content)
                 return stats
         else:
             # 文件不存在，创建默认统计信息并保存
@@ -244,10 +429,19 @@ def load_trade_stats():
             # 立即保存默认统计，确保文件存在
             save_trade_stats(default_stats)
             return default_stats
+    except json.JSONDecodeError as e:
+        # JSON 格式错误，文件可能损坏
+        logger.warning(f"⚠️ 交易统计文件格式错误，重新创建: {TRADE_STATS_FILE} (错误: {e})")
+        default_stats = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'last_updated': None
+        }
+        save_trade_stats(default_stats)
+        return default_stats
     except Exception as e:
         logger.error(f"❌ 读取交易统计文件失败: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         # 返回默认值，但不创建文件（避免覆盖可能存在的数据）
         return {
             'total_trades': 0,
@@ -317,38 +511,92 @@ def load_latest_signal():
         logger.debug(f"从内存获取最新信号失败: {e}")
         return None
 
+# 获取默认配置（包含所有必要的配置项）
+def get_default_bot_config():
+    """返回完整的默认配置，包含所有必要的配置项"""
+    return {
+        'test_mode': True,  # 默认测试模式
+        'leverage': 10,
+        'timeframe': '15m',
+        'base_usdt_amount': 100,
+        # 分档移动止盈参数（默认值）
+        'stop_loss_pct': 2.0,
+        'low_trail_stop_loss_pct': 0.2,
+        'trail_stop_loss_pct': 0.2,
+        'higher_trail_stop_loss_pct': 0.25,
+        'low_trail_profit_threshold': 0.3,
+        'first_trail_profit_threshold': 1.0,
+        'second_trail_profit_threshold': 3.0,
+        'last_updated': datetime.now().isoformat()
+    }
+
 # 读取机器人配置文件
 def load_bot_config():
     """从配置文件加载机器人配置"""
     try:
         if os.path.exists(BOT_CONFIG_FILE):
+            # 检查文件是否为空
+            if os.path.getsize(BOT_CONFIG_FILE) == 0:
+                logger.warning(f"⚠️ 配置文件为空，使用默认配置: {BOT_CONFIG_FILE}")
+                default_config = get_default_bot_config()
+                save_bot_config(default_config)
+                return default_config
+            
             with open(BOT_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
+                content = f.read().strip()
+                # 如果文件内容为空或只有空白字符
+                if not content:
+                    logger.warning(f"⚠️ 配置文件内容为空，使用默认配置: {BOT_CONFIG_FILE}")
+                    default_config = get_default_bot_config()
+                    save_bot_config(default_config)
+                    return default_config
+                
+                # 尝试解析 JSON
+                config = json.loads(content)
+                
+                # 获取默认配置，用于补充缺失的配置项
+                default_config = get_default_bot_config()
+                
+                # 检查并补充缺失的配置项（不覆盖已存在的配置）
+                config_updated = False
+                for key, default_value in default_config.items():
+                    if key not in config:
+                        config[key] = default_value
+                        config_updated = True
+                    elif config.get(key) is None and key != 'last_updated':
+                        # 如果配置项存在但值为 None，使用默认值
+                        config[key] = default_value
+                        config_updated = True
+                
                 # 确保 test_mode 有值（如果不存在或为 None，才设置默认值）
                 # 注意：如果用户明确设置为 False，这里不应该覆盖
                 if 'test_mode' not in config:
                     config['test_mode'] = True
-                    # 只在配置项完全不存在时才保存默认值
-                    save_bot_config(config)
+                    config_updated = True
                 elif config.get('test_mode') is None:
                     # 如果存在但值为 None，也设置为默认值
                     config['test_mode'] = True
+                    config_updated = True
+                
+                # 如果配置有更新，保存到文件
+                if config_updated:
                     save_bot_config(config)
+                
                 return config
         else:
             # 默认配置
-            default_config = {
-                'test_mode': True,  # 默认测试模式
-                'leverage': 10,
-                'timeframe': '15m',
-                'base_usdt_amount': 100,
-                'last_updated': datetime.now().isoformat()
-            }
+            default_config = get_default_bot_config()
             save_bot_config(default_config)
             return default_config
+    except json.JSONDecodeError as e:
+        # JSON 格式错误，文件可能损坏
+        logger.warning(f"⚠️ 配置文件格式错误，使用默认配置: {BOT_CONFIG_FILE} (错误: {e})")
+        default_config = get_default_bot_config()
+        save_bot_config(default_config)
+        return default_config
     except Exception as e:
         logger.error(f"读取机器人配置失败: {e}")
-        return {'test_mode': True, 'leverage': 10, 'timeframe': '15m', 'base_usdt_amount': 100}
+        return get_default_bot_config()
 
 # 保存机器人配置文件
 def save_bot_config(config):
@@ -727,9 +975,9 @@ def get_status():
         try:
             is_windows = platform.system() == 'Windows'
             if is_windows:
-                result = subprocess.run('pm2 jlist', shell=True, capture_output=True, text=True, timeout=5)
+                result = subprocess.run('pm2 jlist', shell=True, capture_output=True, text=True, timeout=15)
             else:
-                result = subprocess.run(['pm2', 'jlist'], capture_output=True, text=True, timeout=5)
+                result = subprocess.run(['pm2', 'jlist'], capture_output=True, text=True, timeout=15)
             
             if result.returncode == 0:
                 import json
@@ -739,6 +987,9 @@ def get_status():
                         status = proc.get('pm2_env', {}).get('status', 'unknown')
                         bot_running = status == 'online'
                         break
+        except subprocess.TimeoutExpired:
+            # PM2检查超时，不影响其他功能
+            logger.warning("pm2 jlist 命令超时（在状态检查中）")
         except Exception:
             # PM2检查失败，不影响其他功能
             pass
@@ -799,13 +1050,15 @@ def get_status():
         
         # 获取初始资金（从资金曲线或配置）
         equity_curve_file = os.path.join(BASE_DIR, 'equity_curve.json')
-        if os.path.exists(equity_curve_file):
+        if os.path.exists(equity_curve_file) and os.path.getsize(equity_curve_file) > 0:
             try:
                 with open(equity_curve_file, 'r', encoding='utf-8') as f:
-                    equity_data = json.load(f)
-                    if equity_data and len(equity_data) > 0:
-                        initial_balance = equity_data[0].get('balance', 0)
-            except:
+                    content = f.read().strip()
+                    if content:
+                        equity_data = json.loads(content)
+                        if equity_data and len(equity_data) > 0:
+                            initial_balance = equity_data[0].get('balance', 0)
+            except (json.JSONDecodeError, Exception):
                 pass
         
         # 如果资金曲线中没有初始资金，从配置读取
@@ -1111,17 +1364,27 @@ def get_bot_status():
         # Windows 环境下需要使用 shell=True
         is_windows = platform.system() == 'Windows'
         
-        if is_windows:
-            result = subprocess.run('pm2 jlist', 
-                                  shell=True,
-                                  capture_output=True, 
-                                  text=True, 
-                                  timeout=5)
-        else:
-            result = subprocess.run(['pm2', 'jlist'], 
-                                  capture_output=True, 
-                                  text=True, 
-                                  timeout=5)
+        try:
+            if is_windows:
+                result = subprocess.run('pm2 jlist', 
+                                      shell=True,
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=15)
+            else:
+                result = subprocess.run(['pm2', 'jlist'], 
+                                      capture_output=True, 
+                                      text=True, 
+                                      timeout=15)
+        except subprocess.TimeoutExpired:
+            logger.warning("pm2 jlist 命令超时，返回默认状态")
+            return jsonify({
+                'success': True,
+                'running': None,  # 未知状态
+                'status': 'timeout',
+                'uptime_ms': 0,
+                'message': 'PM2状态查询超时'
+            })
         
         if result.returncode == 0:
             import json
@@ -1519,9 +1782,16 @@ def get_equity_curve():
     """获取资金曲线数据"""
     try:
         # 尝试从文件加载资金曲线
-        if os.path.exists(EQUITY_CURVE_FILE):
-            with open(EQUITY_CURVE_FILE, 'r', encoding='utf-8') as f:
-                equity_data = json.load(f)
+        if os.path.exists(EQUITY_CURVE_FILE) and os.path.getsize(EQUITY_CURVE_FILE) > 0:
+            try:
+                with open(EQUITY_CURVE_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        equity_data = json.loads(content)
+                    else:
+                        equity_data = []
+            except (json.JSONDecodeError, Exception):
+                equity_data = []
         else:
             equity_data = []
         
@@ -1533,99 +1803,69 @@ def get_equity_curve():
             if temp_position:
                 actual_balance = temp_position.get('total_balance', 0)
             
-            if os.path.exists(TRADE_AUDIT_FILE):
-                with open(TRADE_AUDIT_FILE, 'r', encoding='utf-8') as f:
-                    audit_data = json.load(f)
+            if os.path.exists(TRADE_AUDIT_FILE) and os.path.getsize(TRADE_AUDIT_FILE) > 0:
+                try:
+                    with open(TRADE_AUDIT_FILE, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            audit_data = json.loads(content)
+                        else:
+                            audit_data = []
+                except (json.JSONDecodeError, Exception):
+                    audit_data = []
+            else:
+                audit_data = []
+            
+            # 如果有审计日志，从日志生成
+            if audit_data:
+                # 初始资金（从配置读取）
+                bot_config = load_bot_config()
+                initial_balance = bot_config.get('base_usdt_amount', 100)
+                current_balance = initial_balance
                 
-                # 如果有审计日志，从日志生成
-                if audit_data:
-                    # 初始资金（从配置读取）
-                    bot_config = load_bot_config()
-                    initial_balance = bot_config.get('base_usdt_amount', 100)
-                    current_balance = initial_balance
-                    
-                    equity_data = [{
-                        'timestamp': datetime.now().isoformat(),
-                        'balance': initial_balance,
-                        'pnl': 0,
-                        'pnl_percent': 0
-                    }]
-                    
-                    # 遍历审计日志计算资金变化
-                    # 只在平仓时记录资金变化（因为只有平仓时 unrealized_pnl 才是已实现的盈亏）
-                    close_types = ['close_position', 'take_profit', 'stop_loss', 'reverse_long_to_short', 'reverse_short_to_long']
-                    
-                    for item in audit_data:
-                        if item.get('executed'):
-                            execution_type = item.get('execution_type', '')
-                            position_after = item.get('position_after', {})
+                equity_data = [{
+                    'timestamp': datetime.now().isoformat(),
+                    'balance': initial_balance,
+                    'pnl': 0,
+                    'pnl_percent': 0
+                }]
+                
+                # 遍历审计日志计算资金变化
+                # 只在平仓时记录资金变化（因为只有平仓时 unrealized_pnl 才是已实现的盈亏）
+                close_types = ['close_position', 'take_profit', 'stop_loss', 'reverse_long_to_short', 'reverse_short_to_long']
+                
+                for item in audit_data:
+                    if item.get('executed'):
+                        execution_type = item.get('execution_type', '')
+                        position_after = item.get('position_after', {})
+                        
+                        # 检查是否是平仓交易
+                        contracts = position_after.get('contracts', 0) if position_after else 0
+                        is_closed = (contracts == 0 or execution_type in close_types)
+                        
+                        # 只在平仓时记录资金变化
+                        if is_closed and position_after:
+                            # 平仓时的 unrealized_pnl 就是已实现的盈亏
+                            realized_pnl = position_after.get('unrealized_pnl', 0)
+                            current_balance += realized_pnl
                             
-                            # 检查是否是平仓交易
-                            contracts = position_after.get('contracts', 0) if position_after else 0
-                            is_closed = (contracts == 0 or execution_type in close_types)
-                            
-                            # 只在平仓时记录资金变化
-                            if is_closed and position_after:
-                                # 平仓时的 unrealized_pnl 就是已实现的盈亏
-                                realized_pnl = position_after.get('unrealized_pnl', 0)
-                                current_balance += realized_pnl
-                                
-                                equity_data.append({
-                                    'timestamp': item.get('timestamp', ''),
-                                    'balance': round(current_balance, 2),
-                                    'pnl': round(realized_pnl, 2),
-                                    'pnl_percent': round((current_balance - initial_balance) / initial_balance * 100, 2)
-                                })
-                    
-                    # 保存资金曲线
-                    with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(equity_data, f, indent=2, ensure_ascii=False)
-                elif actual_balance > 0:
-                    # 审计日志为空，但有实际账户余额，使用配置的初始金额初始化
-                    bot_config = load_bot_config()
-                    config_initial = bot_config.get('base_usdt_amount', 100)  # 默认100
-                    initial_balance = config_initial
-                    
-                    # 获取入金时间（使用配置的last_updated，或当前时间减去1天）
-                    config_last_updated = bot_config.get('last_updated')
-                    if config_last_updated:
-                        try:
-                            initial_timestamp = config_last_updated
-                        except:
-                            from datetime import timedelta
-                            initial_timestamp = (datetime.now() - timedelta(days=1)).isoformat()
-                    else:
-                        from datetime import timedelta
-                        initial_timestamp = (datetime.now() - timedelta(days=1)).isoformat()
-                    
-                    # 初始资金使用配置的金额，而不是当前余额
-                    equity_data = [{
-                        'timestamp': initial_timestamp,
-                        'balance': round(initial_balance, 2),
-                        'pnl': 0,
-                        'pnl_percent': 0
-                    }]
-                    
-                    # 如果当前余额与初始余额不同，添加当前资金点
-                    if abs(actual_balance - initial_balance) > 0.01:
-                        current_pnl = actual_balance - initial_balance
-                        equity_data.append({
-                            'timestamp': datetime.now().isoformat(),
-                            'balance': round(actual_balance, 2),
-                            'pnl': round(current_pnl, 2),
-                            'pnl_percent': round((current_pnl / initial_balance * 100), 2) if initial_balance > 0 else 0
-                        })
-                    
-                    # 保存初始数据
-                    with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(equity_data, f, indent=2, ensure_ascii=False)
+                            equity_data.append({
+                                'timestamp': item.get('timestamp', ''),
+                                'balance': round(current_balance, 2),
+                                'pnl': round(realized_pnl, 2),
+                                'pnl_percent': round((current_balance - initial_balance) / initial_balance * 100, 2)
+                            })
+                
+                # 保存资金曲线
+                with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(equity_data, f, indent=2, ensure_ascii=False)
             elif actual_balance > 0:
-                # 没有审计日志文件，但有实际账户余额，使用配置的初始金额初始化
+                # 审计日志为空，但有实际账户余额，使用配置的初始金额初始化
                 bot_config = load_bot_config()
                 config_initial = bot_config.get('base_usdt_amount', 100)  # 默认100
                 initial_balance = config_initial
                 
-                # 获取入金时间
+                # 获取入金时间（使用配置的last_updated，或当前时间减去1天）
                 config_last_updated = bot_config.get('last_updated')
                 if config_last_updated:
                     try:
@@ -1654,10 +1894,10 @@ def get_equity_curve():
                         'pnl': round(current_pnl, 2),
                         'pnl_percent': round((current_pnl / initial_balance * 100), 2) if initial_balance > 0 else 0
                     })
-                
-                # 保存初始数据
-                with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(equity_data, f, indent=2, ensure_ascii=False)
+                    
+                    # 保存初始数据
+                    with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(equity_data, f, indent=2, ensure_ascii=False)
         
         # 获取当前实际账户余额作为基准
         current_position = get_current_position()
@@ -1708,6 +1948,45 @@ def get_equity_curve():
                     'pnl_percent': round((current_pnl / initial_balance * 100), 2) if initial_balance > 0 else 0
                 })
                 
+                # 保存更新后的资金曲线
+                with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(equity_data, f, indent=2, ensure_ascii=False)
+        
+        # 如果有历史数据，确保添加当前资金作为最新数据点
+        if len(equity_data) > 0 and actual_account_balance > 0:
+            last_balance = equity_data[-1].get('balance', 0)
+            last_timestamp = equity_data[-1].get('timestamp', '')
+            
+            # 如果当前资金与最后一个数据点不同，或者时间已经过去超过5分钟，添加新点
+            from datetime import timedelta
+            try:
+                if last_timestamp:
+                    try:
+                        last_time = datetime.fromisoformat(last_timestamp.replace('Z', '+00:00'))
+                        if last_time.tzinfo is None:
+                            last_time = datetime.fromisoformat(last_timestamp)
+                    except:
+                        last_time = datetime.fromisoformat(last_timestamp)
+                else:
+                    last_time = datetime.now() - timedelta(days=1)
+            except:
+                last_time = datetime.now() - timedelta(days=1)
+            
+            # 移除时区信息以便比较
+            if last_time.tzinfo:
+                last_time = last_time.replace(tzinfo=None)
+            
+            time_diff = (datetime.now() - last_time).total_seconds()
+            balance_diff = abs(actual_account_balance - last_balance)
+            
+            # 如果时间差超过5分钟，或者金额有变化，添加新点
+            if time_diff > 300 or balance_diff > 0.01:
+                equity_data.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'balance': round(actual_account_balance, 2),
+                    'pnl': round(actual_account_balance - equity_data[0]['balance'], 2),
+                    'pnl_percent': round((actual_account_balance - equity_data[0]['balance']) / equity_data[0]['balance'] * 100, 2) if equity_data[0]['balance'] > 0 else 0
+                })
                 # 保存更新后的资金曲线
                 with open(EQUITY_CURVE_FILE, 'w', encoding='utf-8') as f:
                     json.dump(equity_data, f, indent=2, ensure_ascii=False)
@@ -1821,6 +2100,7 @@ def get_overview_data():
 
 @app.route('/api/models')
 @rate_limit
+@simple_cache(ttl=60)  # 模型列表变化不频繁，缓存60秒
 def list_models():
     """返回模型列表与基础信息"""
     try:
@@ -2210,6 +2490,7 @@ def get_profit_curve():
 
 @app.route('/api/ai_model_info')
 @rate_limit
+@simple_cache(ttl=30)  # AI模型信息缓存30秒
 def get_ai_model_info():
     """获取AI模型信息"""
     try:
@@ -2298,9 +2579,32 @@ def get_signals():
             'recent_signals': []
         })
 
+# SocketIO 默认错误处理器：捕获所有 SocketIO 相关异常
+@socketio.on_error_default
+def default_error_handler(e):
+    """处理 SocketIO 默认错误，特别是会话断开错误"""
+    error_str = str(e)
+    error_type = type(e).__name__
+    
+    # 静默处理会话断开错误（避免日志噪音）
+    if error_type == 'KeyError' and ('Session is disconnected' in error_str or 'disconnected' in error_str.lower()):
+        # 会话已断开，静默处理
+        return
+    
+    # 其他 SocketIO 错误记录日志
+    logger.error(f"SocketIO 错误: {error_type}: {error_str}")
+    import traceback
+    logger.error(traceback.format_exc())
+
 # WebSocket事件
 @socketio.on('connect')
-def handle_connect():
+@socketio_error_handler
+def handle_connect(*args, **kwargs):
+    """处理 WebSocket 连接事件
+    
+    Args:
+        *args, **kwargs: SocketIO 可能传递的参数（为了兼容性全部接受）
+    """
     # 连接日志：减少日志噪音，仅在关键信息时记录
     try:
         client_ip = request.environ.get('REMOTE_ADDR', 'unknown') if request else 'unknown'
@@ -2309,10 +2613,23 @@ def handle_connect():
         pass
     except:
         pass
-    emit('status', {'message': '连接成功'})
+    try:
+        emit('status', {'message': '连接成功'})
+    except (KeyError, Exception) as e:
+        # 如果会话已断开，忽略错误（避免日志噪音）
+        # 这种情况可能发生在客户端快速连接和断开时
+        if 'Session is disconnected' not in str(e) and 'disconnected' not in str(e).lower():
+            # 只有非会话断开错误才记录
+            pass
 
 @socketio.on('disconnect')
-def handle_disconnect():
+@socketio_error_handler
+def handle_disconnect(*args, **kwargs):
+    """处理 WebSocket 断开事件
+    
+    Args:
+        *args, **kwargs: SocketIO 可能传递的参数（为了兼容性全部接受）
+    """
     # 断开日志：减少日志噪音，正常断开不记录
     # 只在异常断开或需要调试时记录
     pass

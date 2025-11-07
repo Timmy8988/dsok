@@ -1086,6 +1086,18 @@ function initializeEquityRangeSelector() {
 // 加载资金曲线（优先使用新的overview接口，回退到旧的equity_curve接口）
 async function loadEquityCurve() {
     try {
+        // 先获取当前持仓数据，确保有最新的账户余额
+        let currentBalance = null;
+        try {
+            const statusResponse = await fetch('/api/status');
+            const statusData = await statusResponse.json();
+            if (statusData.position && statusData.position.total_balance) {
+                currentBalance = statusData.position.total_balance;
+            }
+        } catch (e) {
+            console.warn('获取持仓数据失败:', e);
+        }
+        
         // 优先尝试使用新的 /api/overview 接口（基于SQLite数据库）
         let response = await fetch(`/api/overview?range=${currentEquityRange}`);
         let data = await response.json();
@@ -1097,7 +1109,19 @@ async function loadEquityCurve() {
             data = await response.json();
             
             if (data.success) {
-                // 使用旧接口的数据格式
+                // 使用旧接口的数据格式，添加当前资金点
+                if (currentBalance && data.data && data.data.length > 0) {
+                    const lastPoint = data.data[data.data.length - 1];
+                    const lastBalance = lastPoint.balance || 0;
+                    if (Math.abs(currentBalance - lastBalance) > 0.01) {
+                        data.data.push({
+                            timestamp: new Date().toISOString(),
+                            balance: currentBalance,
+                            pnl: currentBalance - (data.data[0].balance || 0),
+                            pnl_percent: ((currentBalance - (data.data[0].balance || 0)) / (data.data[0].balance || 1)) * 100
+                        });
+                    }
+                }
                 updateEquityStatsOld(data.stats);
                 drawEquityChartOld(data.data);
             }
@@ -1106,22 +1130,59 @@ async function loadEquityCurve() {
         
         // 使用新接口的数据格式（多模型支持）
         if (data.aggregate && data.aggregate_series) {
+            // 如果获取到了当前资金，确保数据中包含
+            if (currentBalance && data.aggregate_series.length > 0) {
+                const lastPoint = data.aggregate_series[data.aggregate_series.length - 1];
+                const lastTotal = Object.values(lastPoint).filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
+                if (Math.abs(currentBalance - lastTotal) > 0.01) {
+                    // 添加当前资金点
+                    const newPoint = {};
+                    // 复制最后一个点的结构，但更新总金额
+                    Object.keys(lastPoint).forEach(key => {
+                        if (typeof lastPoint[key] === 'number') {
+                            newPoint[key] = 0;
+                        } else {
+                            newPoint[key] = lastPoint[key];
+                        }
+                    });
+                    // 设置当前资金（假设只有一个模型，或者需要根据实际情况调整）
+                    const firstKey = Object.keys(newPoint).find(k => typeof lastPoint[k] === 'number');
+                    if (firstKey) {
+                        newPoint[firstKey] = currentBalance;
+                    }
+                    newPoint.timestamp = new Date().toISOString();
+                    data.aggregate_series.push(newPoint);
+                }
+            }
             updateEquityStatsNew(data);
-            drawEquityChartNew(data);
+            drawEquityChartNew(data, currentBalance);
         } else if (data.series && Object.keys(data.series).length > 0) {
             // 有模型数据，使用第一个模型的数据
             const firstModelKey = Object.keys(data.series)[0];
-            const modelData = data.series[firstModelKey];
+            let modelData = data.series[firstModelKey];
+            
+            // 如果获取到了当前资金，确保数据中包含
+            if (currentBalance && modelData.length > 0) {
+                const lastPoint = modelData[modelData.length - 1];
+                const lastEquity = lastPoint.total_equity || 0;
+                if (Math.abs(currentBalance - lastEquity) > 0.01) {
+                    modelData.push({
+                        timestamp: new Date().toISOString(),
+                        total_equity: currentBalance
+                    });
+                }
+            }
+            
             updateEquityStatsFromModel(modelData, data.models[firstModelKey]);
-            drawEquityChartFromSeries(modelData);
+            drawEquityChartFromSeries(modelData, currentBalance);
         }
     } catch (error) {
         console.error('加载资金曲线失败:', error);
         // 回退到旧接口
-    try {
-        const response = await fetch('/api/equity_curve');
-        const data = await response.json();
-        if (data.success) {
+        try {
+            const response = await fetch('/api/equity_curve');
+            const data = await response.json();
+            if (data.success) {
                 updateEquityStatsOld(data.stats);
                 drawEquityChartOld(data.data);
             }
@@ -1260,7 +1321,7 @@ function updateEquityStatsDisplay(initial, current, returnPct, drawdown) {
 }
 
 // 绘制图表（新接口格式 - 多模型）
-function drawEquityChartNew(data) {
+function drawEquityChartNew(data, currentBalance = null) {
     if (!equityChart) {
         initEquityChart();
     }
@@ -1289,21 +1350,48 @@ function drawEquityChartNew(data) {
             prevValue = total;
         });
         
-        // 添加当前资金作为最新数据点（如果与最后一个点不同）
-        const accountBalanceEl = document.getElementById('accountBalance');
-        if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
-            const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
-            const currentBalance = parseFloat(balanceText);
-            if (!isNaN(currentBalance) && currentBalance > 0) {
-                const lastValue = processedData[processedData.length - 1]?.value[1];
-                if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
-                    // 当前资金与最后一个数据点不同，添加当前资金点
-                    const now = new Date().getTime();
-                    processedData.push({
-                        value: [now, currentBalance],
-                        isChanged: true
-                    });
+        // 添加当前资金作为最新数据点
+        // 优先使用传入的 currentBalance，否则从 DOM 获取
+        let actualCurrentBalance = currentBalance;
+        if (!actualCurrentBalance) {
+            const accountBalanceEl = document.getElementById('accountBalance');
+            if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+                const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
+                actualCurrentBalance = parseFloat(balanceText);
+            }
+        }
+        
+        if (actualCurrentBalance && !isNaN(actualCurrentBalance) && actualCurrentBalance > 0) {
+            const now = new Date().getTime();
+            const lastDataPoint = processedData[processedData.length - 1];
+            
+            // 如果最后一个数据点存在，检查是否需要更新
+            if (lastDataPoint) {
+                const lastTime = lastDataPoint.value[0];
+                const lastValue = lastDataPoint.value[1];
+                const timeDiff = now - lastTime;
+                const valueDiff = Math.abs(actualCurrentBalance - lastValue);
+                
+                // 如果时间已经过去超过5分钟，或者金额有变化，更新或添加新点
+                if (timeDiff > 5 * 60 * 1000 || valueDiff > 0.01) {
+                    // 如果时间差很大，添加新点；如果时间差小但金额变化，更新最后一个点
+                    if (timeDiff > 5 * 60 * 1000) {
+                        processedData.push({
+                            value: [now, actualCurrentBalance],
+                            isChanged: valueDiff > 0.01
+                        });
+                    } else {
+                        // 更新时间接近，更新最后一个点
+                        lastDataPoint.value = [now, actualCurrentBalance];
+                        lastDataPoint.isChanged = valueDiff > 0.01;
+                    }
                 }
+            } else {
+                // 没有历史数据，直接添加当前资金点
+                processedData.push({
+                    value: [now, actualCurrentBalance],
+                    isChanged: true
+                });
             }
         }
         
@@ -1417,7 +1505,7 @@ function drawEquityChartNew(data) {
 }
 
 // 从单个模型系列绘制图表
-function drawEquityChartFromSeries(seriesData) {
+function drawEquityChartFromSeries(seriesData, currentBalance = null) {
     if (!equityChart) {
         initEquityChart();
     }
@@ -1444,21 +1532,48 @@ function drawEquityChartFromSeries(seriesData) {
         prevValue = total;
     });
     
-    // 添加当前资金作为最新数据点（如果与最后一个点不同）
-    const accountBalanceEl = document.getElementById('accountBalance');
-    if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
-        const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
-        const currentBalance = parseFloat(balanceText);
-        if (!isNaN(currentBalance) && currentBalance > 0) {
-            const lastValue = processedData[processedData.length - 1]?.value[1];
-            if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
-                // 当前资金与最后一个数据点不同，添加当前资金点
-                const now = new Date().getTime();
-                processedData.push({
-                    value: [now, currentBalance],
-                    isChanged: true
-                });
+    // 添加当前资金作为最新数据点
+    // 优先使用传入的 currentBalance，否则从 DOM 获取
+    let actualCurrentBalance = currentBalance;
+    if (!actualCurrentBalance) {
+        const accountBalanceEl = document.getElementById('accountBalance');
+        if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
+            const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
+            actualCurrentBalance = parseFloat(balanceText);
+        }
+    }
+    
+    if (actualCurrentBalance && !isNaN(actualCurrentBalance) && actualCurrentBalance > 0) {
+        const now = new Date().getTime();
+        const lastDataPoint = processedData[processedData.length - 1];
+        
+        // 如果最后一个数据点存在，检查是否需要更新
+        if (lastDataPoint) {
+            const lastTime = lastDataPoint.value[0];
+            const lastValue = lastDataPoint.value[1];
+            const timeDiff = now - lastTime;
+            const valueDiff = Math.abs(actualCurrentBalance - lastValue);
+            
+            // 如果时间已经过去超过5分钟，或者金额有变化，更新或添加新点
+            if (timeDiff > 5 * 60 * 1000 || valueDiff > 0.01) {
+                // 如果时间差很大，添加新点；如果时间差小但金额变化，更新最后一个点
+                if (timeDiff > 5 * 60 * 1000) {
+                    processedData.push({
+                        value: [now, actualCurrentBalance],
+                        isChanged: valueDiff > 0.01
+                    });
+                } else {
+                    // 更新时间接近，更新最后一个点
+                    lastDataPoint.value = [now, actualCurrentBalance];
+                    lastDataPoint.isChanged = valueDiff > 0.01;
+                }
             }
+        } else {
+            // 没有历史数据，直接添加当前资金点
+            processedData.push({
+                value: [now, actualCurrentBalance],
+                isChanged: true
+            });
         }
     }
     
@@ -1598,16 +1713,38 @@ function drawEquityChartOld(equityData) {
         prevValue = balance;
     });
     
-    // 添加当前资金作为最新数据点（如果与最后一个点不同）
+    // 添加当前资金作为最新数据点
     const accountBalanceEl = document.getElementById('accountBalance');
     if (accountBalanceEl && accountBalanceEl.textContent && accountBalanceEl.textContent !== '$0.00') {
         const balanceText = accountBalanceEl.textContent.replace('$', '').replace(/,/g, '');
         const currentBalance = parseFloat(balanceText);
         if (!isNaN(currentBalance) && currentBalance > 0) {
-            const lastValue = processedData[processedData.length - 1]?.value[1];
-            if (lastValue === undefined || Math.abs(currentBalance - lastValue) > 0.01) {
-                // 当前资金与最后一个数据点不同，添加当前资金点
-                const now = new Date().getTime();
+            const now = new Date().getTime();
+            const lastDataPoint = processedData[processedData.length - 1];
+            
+            // 如果最后一个数据点存在，检查是否需要更新
+            if (lastDataPoint) {
+                const lastTime = lastDataPoint.value[0];
+                const lastValue = lastDataPoint.value[1];
+                const timeDiff = now - lastTime;
+                const valueDiff = Math.abs(currentBalance - lastValue);
+                
+                // 如果时间已经过去超过5分钟，或者金额有变化，更新或添加新点
+                if (timeDiff > 5 * 60 * 1000 || valueDiff > 0.01) {
+                    // 如果时间差很大，添加新点；如果时间差小但金额变化，更新最后一个点
+                    if (timeDiff > 5 * 60 * 1000) {
+                        processedData.push({
+                            value: [now, currentBalance],
+                            isChanged: valueDiff > 0.01
+                        });
+                    } else {
+                        // 更新时间接近，更新最后一个点
+                        lastDataPoint.value = [now, currentBalance];
+                        lastDataPoint.isChanged = valueDiff > 0.01;
+                    }
+                }
+            } else {
+                // 没有历史数据，直接添加当前资金点
                 processedData.push({
                     value: [now, currentBalance],
                     isChanged: true

@@ -1227,7 +1227,8 @@ def format_history_table(history: List[Dict]) -> str:
         seq_no = idx - total
         signal = (record.get('signal') or '--').upper().ljust(4)
         confidence = (record.get('confidence') or '--').upper().ljust(3)
-        leverage = f"{int(record.get('leverage', 0)):>2}x"
+        leverage_val = record.get('leverage')
+        leverage = f"{int(leverage_val or 0):>2}x"
         entry = format_number(record.get('entry_price'))
         validation = format_number(record.get('validation_price'))
         change_pct = format_percentage(record.get('price_change_pct'))
@@ -1388,7 +1389,7 @@ def append_signal_record(symbol: str, signal_data: Dict, entry_price: float, tim
         'timestamp': timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'signal': (signal_data.get('signal') or '').upper(),
         'confidence': (signal_data.get('confidence') or 'MEDIUM').upper(),
-        'leverage': int(signal_data.get('leverage', 0)) if signal_data.get('leverage') is not None else None,
+        'leverage': int(signal_data.get('leverage') or 0),
         'entry_price': entry_price,
         'validation_price': None,
         'validation_timestamp': None,
