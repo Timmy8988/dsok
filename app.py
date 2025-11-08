@@ -2592,7 +2592,9 @@ def get_signals():
                 'signal_stats': {'BUY': 0, 'SELL': 0, 'HOLD': 0},
                 'confidence_stats': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
                 'total_signals': 0,
-                'recent_signals': []
+                'recent_signals': [],
+                'accuracy_rates': {'BUY': None, 'SELL': None, 'HOLD': None},
+                'confidence_accuracy_rates': {'HIGH': None, 'MEDIUM': None, 'LOW': None}
             })
         
         symbol = request.args.get('symbol')
@@ -2605,7 +2607,9 @@ def get_signals():
                 'signal_stats': {'BUY': 0, 'SELL': 0, 'HOLD': 0},
                 'confidence_stats': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
                 'total_signals': 0,
-                'recent_signals': []
+                'recent_signals': [],
+                'accuracy_rates': {'BUY': None, 'SELL': None, 'HOLD': None},
+                'confidence_accuracy_rates': {'HIGH': None, 'MEDIUM': None, 'LOW': None}
             })
         
         # 统计信号分布和信心等级
@@ -2637,11 +2641,47 @@ def get_signals():
         all_signals.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         recent_signals = all_signals[:10] if all_signals else []
         
+        # 🆕 计算按信号类型的准确率（BUY/SELL/HOLD）
+        accuracy_rates = {'BUY': None, 'SELL': None, 'HOLD': None}
+        
+        for signal_type in ['BUY', 'SELL', 'HOLD']:
+            evaluated_signals = [
+                s for s in all_signals 
+                if s.get('signal', '').upper() == signal_type and s.get('result') in ('success', 'fail')
+            ]
+            if evaluated_signals:
+                success_count = sum(1 for s in evaluated_signals if s.get('result') == 'success')
+                total_count = len(evaluated_signals)
+                accuracy_rates[signal_type] = {
+                    'rate': (success_count / total_count * 100) if total_count > 0 else 0,
+                    'total': total_count,
+                    'success': success_count
+                }
+        
+        # 🆕 计算按信心等级的准确率（HIGH/MEDIUM/LOW）
+        confidence_accuracy_rates = {'HIGH': None, 'MEDIUM': None, 'LOW': None}
+        
+        for confidence in ['HIGH', 'MEDIUM', 'LOW']:
+            evaluated_signals = [
+                s for s in all_signals 
+                if s.get('confidence', '').upper() == confidence and s.get('result') in ('success', 'fail')
+            ]
+            if evaluated_signals:
+                success_count = sum(1 for s in evaluated_signals if s.get('result') == 'success')
+                total_count = len(evaluated_signals)
+                confidence_accuracy_rates[confidence] = {
+                    'rate': (success_count / total_count * 100) if total_count > 0 else 0,
+                    'total': total_count,
+                    'success': success_count
+                }
+        
         return jsonify({
             'signal_stats': signal_stats,
             'confidence_stats': confidence_stats,
             'total_signals': len(all_signals),
-            'recent_signals': recent_signals
+            'recent_signals': recent_signals,
+            'accuracy_rates': accuracy_rates,  # 🆕 添加信号类型准确率
+            'confidence_accuracy_rates': confidence_accuracy_rates  # 🆕 添加信心等级准确率
         })
     except Exception as e:
         logger.error(f"获取信号统计失败: {e}")
@@ -2651,7 +2691,9 @@ def get_signals():
             'signal_stats': {'BUY': 0, 'SELL': 0, 'HOLD': 0},
             'confidence_stats': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
             'total_signals': 0,
-            'recent_signals': []
+            'recent_signals': [],
+            'accuracy_rates': {'BUY': None, 'SELL': None, 'HOLD': None},
+            'confidence_accuracy_rates': {'HIGH': None, 'MEDIUM': None, 'LOW': None}
         })
 
 # SocketIO 默认错误处理器：捕获所有 SocketIO 相关异常

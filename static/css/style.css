@@ -1101,6 +1101,138 @@ input:checked + .slider:before {
     color: #856404;
 }
 
+/* ==================== 决策准确率统计样式 ==================== */
+.decision-accuracy {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.decision-accuracy-content {
+    padding: 20px;
+}
+
+.decision-total {
+    text-align: center;
+    margin-bottom: 25px;
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    backdrop-filter: blur(10px);
+}
+
+.decision-total .label {
+    font-size: 16px;
+    font-weight: 600;
+    margin-right: 10px;
+    opacity: 0.9;
+}
+
+.decision-total .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.signal-accuracy-section,
+.confidence-accuracy-section {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    backdrop-filter: blur(10px);
+}
+
+.section-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 15px;
+    color: #fff;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+    padding-bottom: 8px;
+}
+
+.accuracy-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.accuracy-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    transition: background 0.3s ease;
+}
+
+.accuracy-row:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.accuracy-label {
+    font-size: 14px;
+    font-weight: 500;
+    opacity: 0.9;
+}
+
+.accuracy-value {
+    font-size: 16px;
+    font-weight: 700;
+    padding: 4px 12px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* 信号类型准确率颜色 */
+.buy-accuracy {
+    color: #51cf66;
+    background: rgba(81, 207, 102, 0.2);
+}
+
+.hold-accuracy {
+    color: #ffa500;
+    background: rgba(255, 165, 0, 0.2);
+}
+
+.sell-accuracy {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.2);
+}
+
+/* 信心等级准确率颜色 */
+.high-accuracy {
+    color: #34a853;
+    background: rgba(52, 168, 83, 0.2);
+}
+
+.medium-accuracy {
+    color: #1a73e8;
+    background: rgba(26, 115, 232, 0.2);
+}
+
+.low-accuracy {
+    color: #fbbc04;
+    background: rgba(251, 188, 4, 0.2);
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .decision-accuracy-content {
+        padding: 15px;
+    }
+    
+    .decision-total .value {
+        font-size: 24px;
+    }
+    
+    .accuracy-value {
+        font-size: 14px;
+        padding: 3px 10px;
+    }
+}
+
 .bar-bg {
     background: #e9ecef;
     height: 20px;

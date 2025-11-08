@@ -1029,6 +1029,100 @@ async function loadSignalAccuracy() {
     }
 }
 
+// 🆕 加载决策准确率统计（BUY/SELL/HOLD准确率和信心等级准确率）
+async function loadDecisionAccuracy() {
+    try {
+        const response = await fetch('/api/signals');
+        const data = await response.json();
+        
+        // 更新总决策数
+        const totalDecisionsEl = document.getElementById('totalDecisions');
+        if (totalDecisionsEl) {
+            totalDecisionsEl.textContent = data.total_signals || 0;
+        }
+        
+        // 更新BUY准确率（绿色）
+        const buyAccuracyEl = document.getElementById('buyAccuracy');
+        if (buyAccuracyEl && data.accuracy_rates && data.accuracy_rates.BUY) {
+            const buyRate = data.accuracy_rates.BUY;
+            if (buyRate.total > 0) {
+                buyAccuracyEl.textContent = `${buyRate.rate.toFixed(1)}% (${buyRate.success}/${buyRate.total})`;
+            } else {
+                buyAccuracyEl.textContent = '--';
+            }
+        } else if (buyAccuracyEl) {
+            buyAccuracyEl.textContent = '--';
+        }
+        
+        // 更新HOLD准确率（黄色）
+        const holdAccuracyEl = document.getElementById('holdAccuracy');
+        if (holdAccuracyEl && data.accuracy_rates && data.accuracy_rates.HOLD) {
+            const holdRate = data.accuracy_rates.HOLD;
+            if (holdRate.total > 0) {
+                holdAccuracyEl.textContent = `${holdRate.rate.toFixed(1)}% (${holdRate.success}/${holdRate.total})`;
+            } else {
+                holdAccuracyEl.textContent = '--';
+            }
+        } else if (holdAccuracyEl) {
+            holdAccuracyEl.textContent = '--';
+        }
+        
+        // 更新SELL准确率（红色）
+        const sellAccuracyEl = document.getElementById('sellAccuracy');
+        if (sellAccuracyEl && data.accuracy_rates && data.accuracy_rates.SELL) {
+            const sellRate = data.accuracy_rates.SELL;
+            if (sellRate.total > 0) {
+                sellAccuracyEl.textContent = `${sellRate.rate.toFixed(1)}% (${sellRate.success}/${sellRate.total})`;
+            } else {
+                sellAccuracyEl.textContent = '--';
+            }
+        } else if (sellAccuracyEl) {
+            sellAccuracyEl.textContent = '--';
+        }
+        
+        // 更新HIGH信心准确率
+        const highAccuracyEl = document.getElementById('highAccuracy');
+        if (highAccuracyEl && data.confidence_accuracy_rates && data.confidence_accuracy_rates.HIGH) {
+            const highRate = data.confidence_accuracy_rates.HIGH;
+            if (highRate.total > 0) {
+                highAccuracyEl.textContent = `${highRate.rate.toFixed(1)}% (${highRate.success}/${highRate.total})`;
+            } else {
+                highAccuracyEl.textContent = '--';
+            }
+        } else if (highAccuracyEl) {
+            highAccuracyEl.textContent = '--';
+        }
+        
+        // 更新MEDIUM信心准确率
+        const mediumAccuracyEl = document.getElementById('mediumAccuracy');
+        if (mediumAccuracyEl && data.confidence_accuracy_rates && data.confidence_accuracy_rates.MEDIUM) {
+            const mediumRate = data.confidence_accuracy_rates.MEDIUM;
+            if (mediumRate.total > 0) {
+                mediumAccuracyEl.textContent = `${mediumRate.rate.toFixed(1)}% (${mediumRate.success}/${mediumRate.total})`;
+            } else {
+                mediumAccuracyEl.textContent = '--';
+            }
+        } else if (mediumAccuracyEl) {
+            mediumAccuracyEl.textContent = '--';
+        }
+        
+        // 更新LOW信心准确率
+        const lowAccuracyEl = document.getElementById('lowAccuracy');
+        if (lowAccuracyEl && data.confidence_accuracy_rates && data.confidence_accuracy_rates.LOW) {
+            const lowRate = data.confidence_accuracy_rates.LOW;
+            if (lowRate.total > 0) {
+                lowAccuracyEl.textContent = `${lowRate.rate.toFixed(1)}% (${lowRate.success}/${lowRate.total})`;
+            } else {
+                lowAccuracyEl.textContent = '--';
+            }
+        } else if (lowAccuracyEl) {
+            lowAccuracyEl.textContent = '--';
+        }
+    } catch (error) {
+        console.error('加载决策准确率失败:', error);
+    }
+}
+
 // 初始化资金曲线图表（ECharts）
 function initEquityChart() {
     const chartDom = document.getElementById('equityChart');
@@ -2059,6 +2153,7 @@ function updateNewFeatures() {
     
     // 其他功能可以并行加载
     loadSignalAccuracy();
+    loadDecisionAccuracy();  // 🆕 加载决策准确率
     loadEquityCurve();
     
     // 等待异步操作完成
