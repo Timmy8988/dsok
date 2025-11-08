@@ -303,6 +303,94 @@ def cleanup_cache():
     except Exception as e:
         logger.error(f"清理缓存时出错: {e}")
 
+# 账户余额缓存（独立缓存，避免频繁调用OKX API）
+BALANCE_CACHE = {}  # {exchange_key: {'data': {...}, 'time': timestamp}}
+BALANCE_CACHE_TTL = 5  # 账户余额缓存5秒
+
+def get_cached_account_balance(exchange_instance, use_cache=True):
+    """
+    获取账户余额（带缓存，避免频繁调用OKX API导致限流）
+    
+    Args:
+        exchange_instance: 交易所实例
+        use_cache: 是否使用缓存，默认True
+    
+    Returns:
+        dict: {'eq_usd': float, 'avail_eq': float, 'free_balance': float, 'total_balance': float} 或 None
+    """
+    if exchange_instance is None:
+        return None
+    
+    # 生成缓存键（基于exchange实例的id）
+    cache_key = id(exchange_instance)
+    current_time = time.time()
+    
+    # 检查缓存
+    if use_cache and cache_key in BALANCE_CACHE:
+        cached_data, cached_time = BALANCE_CACHE[cache_key]['data'], BALANCE_CACHE[cache_key]['time']
+        if current_time - cached_time < BALANCE_CACHE_TTL:
+            # 缓存有效，直接返回
+            return cached_data
+    
+    # 缓存无效或不存在，调用API
+    try:
+        balance_response = exchange_instance.private_get_account_balance({'ccy': 'USDT'})
+        if balance_response and 'data' in balance_response and balance_response['data']:
+            account_data = balance_response['data'][0]
+            details = account_data.get('details', [])
+            
+            # 解析余额数据
+            free_balance = 0
+            total_balance = 0
+            for detail in details:
+                if detail.get('ccy') == 'USDT':
+                    avail_bal = detail.get('availBal') or detail.get('availEq') or detail.get('eq')
+                    total_bal = detail.get('bal') or detail.get('eq') or detail.get('frozenBal')
+                    if avail_bal is not None:
+                        free_balance = float(avail_bal)
+                    else:
+                        free_balance = float(detail.get('availBal', 0))
+                    if total_bal is not None:
+                        total_balance = float(total_bal)
+                    else:
+                        total_balance = float(detail.get('bal', 0))
+                    break
+            
+            # 如果details中没有找到，使用总权益
+            if free_balance == 0:
+                avail_eq = account_data.get('availEq')
+                if avail_eq:
+                    free_balance = float(avail_eq)
+            if total_balance == 0:
+                eq_usd = account_data.get('eqUsd')
+                if eq_usd:
+                    total_balance = float(eq_usd)
+            
+            result = {
+                'eq_usd': account_data.get('eqUsd'),
+                'avail_eq': account_data.get('availEq'),
+                'free_balance': free_balance,
+                'total_balance': total_balance
+            }
+            
+            # 存储到缓存
+            BALANCE_CACHE[cache_key] = {'data': result, 'time': current_time}
+            
+            return result
+    except Exception as e:
+        error_str = str(e)
+        # 如果遇到限流错误，尝试使用缓存数据
+        if '50011' in error_str or 'Too Many Requests' in error_str:
+            logger.warning(f"账户余额API限流，尝试使用缓存数据: {e}")
+            if cache_key in BALANCE_CACHE:
+                cached_data = BALANCE_CACHE[cache_key]['data']
+                logger.info(f"使用缓存的账户余额数据（缓存时间: {current_time - BALANCE_CACHE[cache_key]['time']:.1f}秒前）")
+                return cached_data
+        else:
+            logger.error(f"获取账户余额失败: {e}")
+    
+    return None
+
 # SocketIO 错误处理装饰器
 def socketio_error_handler(f):
     """装饰器：处理 SocketIO 事件中的异常，特别是会话断开错误"""
@@ -864,39 +952,15 @@ def get_current_position():
         
         positions_data = response['data']
         
-        # 获取账户余额（直接API调用，使用account/balance端点）
-        balance_response = exchange_instance.private_get_account_balance({'ccy': 'USDT'})
-        if not balance_response or 'data' not in balance_response or not balance_response['data']:
-            raise Exception(f"获取账户余额失败: API返回数据为空")
-        
-        account_data = balance_response['data'][0]
-        details = account_data.get('details', [])
-        
-        free_balance = 0
-        total_balance = 0
-        for detail in details:
-            if detail.get('ccy') == 'USDT':
-                avail_bal = detail.get('availBal') or detail.get('availEq') or detail.get('eq')
-                total_bal = detail.get('bal') or detail.get('eq') or detail.get('frozenBal')
-                if avail_bal is not None:
-                    free_balance = float(avail_bal)
-                else:
-                    free_balance = float(detail.get('availBal', 0))
-                if total_bal is not None:
-                    total_balance = float(total_bal)
-                else:
-                    total_balance = float(detail.get('bal', 0))
-                break
-        
-        # 如果details中没有找到，使用总权益
-        if free_balance == 0:
-            avail_eq = account_data.get('availEq')
-            if avail_eq:
-                free_balance = float(avail_eq)
-        if total_balance == 0:
-            eq_usd = account_data.get('eqUsd')
-            if eq_usd:
-                total_balance = float(eq_usd)
+        # 获取账户余额（使用缓存，避免频繁调用API导致限流）
+        balance_data = get_cached_account_balance(exchange_instance, use_cache=True)
+        if balance_data is None:
+            # 如果获取失败，使用默认值
+            free_balance = 0
+            total_balance = 0
+        else:
+            free_balance = balance_data.get('free_balance', 0)
+            total_balance = balance_data.get('total_balance', 0)
         
         for i, pos_data in enumerate(positions_data):
             # 处理OKX格式的持仓数据
@@ -964,6 +1028,7 @@ def index():
 
 @app.route('/api/status')
 @rate_limit
+@simple_cache(ttl=5)  # 缓存5秒，减少频繁的PM2检查和账户余额API调用
 def get_status():
     """获取机器人状态"""
     try:
@@ -1027,21 +1092,28 @@ def get_status():
         if exchange_instance is None:
             exchange_instance = exchange  # 回退到app.py的exchange
         
-        # 获取当前账户余额（总是直接获取，确保准确性）
+        # 获取当前账户余额（使用缓存，避免频繁调用API导致限流）
         try:
             if exchange_instance is not None:
-                balance_response = exchange_instance.private_get_account_balance({'ccy': 'USDT'})
-                if balance_response and 'data' in balance_response and balance_response['data']:
-                    account_data = balance_response['data'][0]
+                balance_data = get_cached_account_balance(exchange_instance, use_cache=True)
+                if balance_data:
                     # 使用总权益（包含未实现盈亏）- 这是账户总价值
-                    eq_usd = account_data.get('eqUsd')  # 总权益（USD等值）
+                    eq_usd = balance_data.get('eq_usd')
                     if eq_usd:
                         current_balance = float(eq_usd)
                     else:
-                        # 如果没有eqUsd，尝试使用availEq
-                        avail_eq = account_data.get('availEq')
-                        if avail_eq:
-                            current_balance = float(avail_eq)
+                        # 如果没有eq_usd，尝试使用total_balance或avail_eq
+                        total_bal = balance_data.get('total_balance')
+                        if total_bal:
+                            current_balance = float(total_bal)
+                        else:
+                            avail_eq = balance_data.get('avail_eq')
+                            if avail_eq:
+                                current_balance = float(avail_eq)
+                else:
+                    # 如果获取失败，尝试从position获取
+                    if position:
+                        current_balance = position.get('total_balance', 0) or position.get('free_balance', 0)
         except Exception as e:
             logger.error(f"获取账户余额失败: {e}")
             # 如果API调用失败，尝试从position获取
@@ -1354,6 +1426,7 @@ export NVM_DIR="$HOME/.nvm"
 
 @app.route('/api/bot_status', methods=['GET'])
 @rate_limit
+@simple_cache(ttl=10)  # PM2状态变化不频繁，缓存10秒
 def get_bot_status():
     """获取交易机器人运行状态"""
     try:
@@ -1497,6 +1570,7 @@ def update_config():
 
 @app.route('/api/refresh_data', methods=['POST'])
 @rate_limit
+@simple_cache(ttl=5)  # 缓存5秒，减少频繁的数据获取和API调用
 def refresh_data():
     """立即刷新数据"""
     try:
@@ -2081,6 +2155,7 @@ def get_equity_curve():
 
 @app.route('/api/overview')
 @rate_limit
+@simple_cache(ttl=10)  # 总览数据变化不频繁，缓存10秒
 def get_overview_data():
     """首页总览数据（含多模型资金曲线）- 使用SQLite数据库的余额历史"""
     range_key = request.args.get('range', '1d')

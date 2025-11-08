@@ -436,7 +436,7 @@ function updateRefreshInterval() {
 }
 
 // 开始自动刷新
-function startAutoRefresh(interval = 2) {
+function startAutoRefresh(interval = 5) {  // 默认改为5秒，减少服务器压力
     if (refreshInterval) {
         clearInterval(refreshInterval);
     }
